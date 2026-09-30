@@ -1,0 +1,21 @@
+[project]
+name = "policyreset"
+version = "4.2.4"
+description = "Windows Local Group Policy diagnostic, backup, reset and verification utility"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+keywords = [
+    "windows",
+    "group-policy",
+    "registry",
+    "sysadmin",
+    "windows-administration",
+    "policy-management",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = []
