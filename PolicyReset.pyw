@@ -1,0 +1,2000 @@
+#!/usr/bin/env python3
+"""
+PolicyReset 4.2.4
+
+Windows Local Group Policy diagnostic, backup, reset and verification utility.
+
+The application is designed to run entirely in PowerShell. When launched by
+Windows through the .pyw file association, it opens a persistent PowerShell
+console and re-executes itself with python.exe. When started directly from an
+existing PowerShell console with python.exe, it stays in that same console.
+
+Scope:
+    - Local Group Policy for the current Computer and User.
+    - Backup before modification.
+    - Verification after modification.
+    - Group Policy refresh as a separate explicit operation.
+    - Optional forced removal only for local Group Policy stores that failed
+      normal removal.
+
+PolicyReset does not remove or bypass Active Directory, Microsoft Entra ID,
+MDM, Intune or other remote organisation-controlled policy.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import datetime as dt
+import json
+import locale
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import winreg
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
+from typing import Any
+
+
+APP_NAME = "PolicyReset"
+VERSION = "4.2.4"
+
+DATA_ROOT = (
+    Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+    / APP_NAME
+)
+
+SESSION_ROOT = DATA_ROOT / "Sessions"
+LOG_ROOT = DATA_ROOT / "Logs"
+
+LOCAL_GPO_DIRECTORIES = (
+    Path(os.environ.get("WINDIR", r"C:\Windows"))
+    / "System32"
+    / "GroupPolicy",
+    Path(os.environ.get("WINDIR", r"C:\Windows"))
+    / "System32"
+    / "GroupPolicyUsers",
+)
+
+POLICY_REGISTRY_ROOTS = (
+    ("HKCU", r"Software\Policies"),
+    (
+        "HKCU",
+        r"Software\Microsoft\Windows\CurrentVersion\Policies",
+    ),
+    ("HKLM", r"SOFTWARE\Policies"),
+    (
+        "HKLM",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies",
+    ),
+)
+
+MANAGEMENT_KEYS = (
+    (
+        r"HKLM\SOFTWARE\Microsoft\Enrollments",
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Enrollments",
+    ),
+    (
+        r"HKLM\SOFTWARE\Microsoft\PolicyManager",
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\PolicyManager",
+    ),
+    (
+        r"HKLM\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts",
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Provisioning\OMADM\Accounts",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class PolicyEntry:
+    hive: str
+    path: str
+    value_name: str
+    value: str
+
+    @property
+    def full_path(self) -> str:
+        return f"{self.hive}\\{self.path}\\{self.value_name}"
+
+
+@dataclass(frozen=True)
+class ManagementState:
+    domain_joined: bool
+    entra_joined: bool
+    enterprise_joined: bool
+    mdm_discovery_url_present: bool
+    registry_management_locations: tuple[str, ...]
+
+    @property
+    def organisation_managed_indicator(self) -> bool:
+        return any(
+            (
+                self.domain_joined,
+                self.entra_joined,
+                self.enterprise_joined,
+                self.mdm_discovery_url_present,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class RemovalFailure:
+    path: str
+    reason: str
+
+
+@dataclass
+class Session:
+    directory: Path
+    log_file: Path
+
+
+class PolicyResetError(RuntimeError):
+    """Expected PolicyReset error."""
+
+
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def is_admin() -> bool:
+    if not is_windows():
+        return False
+
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except OSError:
+        return False
+
+
+def configure_console() -> None:
+    """Keep output readable in the existing PowerShell console."""
+    preferred = locale.getpreferredencoding(False)
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except (AttributeError, OSError):
+            continue
+
+    if preferred:
+        # Keep the preferred encoding available for diagnostics.
+        pass
+
+
+def timestamp() -> str:
+    return dt.datetime.now().astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S %z"
+    )
+
+
+def session_timestamp() -> str:
+    return dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+
+def create_session() -> Session:
+    session_directory = SESSION_ROOT / session_timestamp()
+    session_directory.mkdir(parents=True, exist_ok=True)
+
+    LOG_ROOT.mkdir(parents=True, exist_ok=True)
+
+    log_file = (
+        LOG_ROOT
+        / f"PolicyReset_{session_directory.name}.log"
+    )
+
+    return Session(
+        directory=session_directory,
+        log_file=log_file,
+    )
+
+
+class Logger:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write(self, level: str, message: str) -> None:
+        line = f"[{timestamp()}] [{level}] {message}"
+        print(line)
+        with self.path.open(
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(line + "\n")
+
+    def info(self, message: str) -> None:
+        self.write("INFO", message)
+
+    def warn(self, message: str) -> None:
+        self.write("WARN", message)
+
+    def error(self, message: str) -> None:
+        self.write("ERROR", message)
+
+
+def command_exists(command: str) -> bool:
+    return shutil.which(command) is not None
+
+
+def _windows_output_encodings() -> list[str]:
+    """Return likely encodings for native Windows command output."""
+    encodings: list[str] = []
+
+    if is_windows():
+        try:
+            console_code_page = int(
+                ctypes.windll.kernel32.GetConsoleOutputCP()
+            )
+        except (OSError, AttributeError):
+            console_code_page = 0
+
+        try:
+            oem_code_page = int(
+                ctypes.windll.kernel32.GetOEMCP()
+            )
+        except (OSError, AttributeError):
+            oem_code_page = 0
+
+        for code_page in (console_code_page, oem_code_page):
+            if code_page:
+                encodings.append(f"cp{code_page}")
+
+    encodings.extend(
+        [
+            locale.getpreferredencoding(False),
+            "cp850",
+            "cp1252",
+            "utf-8",
+        ]
+    )
+    return encodings
+
+
+def decode_output(data: bytes) -> str:
+    """Decode native Windows command output without common mojibake."""
+    seen: set[str] = set()
+
+    for encoding in _windows_output_encodings():
+        if not encoding:
+            continue
+
+        normalised = encoding.lower()
+        if normalised in seen:
+            continue
+        seen.add(normalised)
+
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return data.decode("utf-8", errors="replace")
+
+
+def run_command(
+    command: list[str],
+    *,
+    timeout: int,
+) -> tuple[int, str, str]:
+    process = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        creationflags=getattr(
+            subprocess,
+            "CREATE_NO_WINDOW",
+            0,
+        ),
+    )
+
+    return (
+        process.returncode,
+        decode_output(process.stdout),
+        decode_output(process.stderr),
+    )
+
+
+
+def system_summary() -> dict[str, Any]:
+    return {
+        "computer": os.environ.get(
+            "COMPUTERNAME",
+            "Unknown",
+        ),
+        "user": os.environ.get(
+            "USERNAME",
+            "Unknown",
+        ),
+        "administrator": is_admin(),
+        "windows_directory": os.environ.get(
+            "WINDIR",
+            r"C:\Windows",
+        ),
+        "python_version": sys.version.split()[0],
+    }
+
+
+def detect_management_state() -> ManagementState:
+    domain_joined = False
+    entra_joined = False
+    enterprise_joined = False
+    mdm_discovery = False
+
+    if command_exists("dsregcmd.exe"):
+        _, stdout, stderr = run_command(
+            ["dsregcmd.exe", "/status"],
+            timeout=30,
+        )
+
+        values: dict[str, str] = {}
+
+        for line in f"{stdout}\n{stderr}".splitlines():
+            if ":" not in line:
+                continue
+
+            key, value = line.split(":", 1)
+            values[key.strip().lower()] = value.strip()
+
+        domain_joined = (
+            values.get("domainjoined", "").upper() == "YES"
+        )
+        entra_joined = (
+            values.get("azureadjoined", "").upper() == "YES"
+        )
+        enterprise_joined = (
+            values.get("enterprisejoined", "").upper() == "YES"
+        )
+
+        mdm_value = values.get("mdmurl", "")
+        mdm_discovery = bool(
+            mdm_value
+            and mdm_value.lower() not in {
+                "not set",
+                "n/a",
+            }
+        )
+
+    locations: list[str] = []
+
+    for display, hive, path in MANAGEMENT_KEYS:
+        try:
+            with winreg.OpenKey(
+                hive,
+                path,
+                0,
+                winreg.KEY_READ,
+            ):
+                locations.append(display)
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+
+    return ManagementState(
+        domain_joined=domain_joined,
+        entra_joined=entra_joined,
+        enterprise_joined=enterprise_joined,
+        mdm_discovery_url_present=mdm_discovery,
+        registry_management_locations=tuple(locations),
+    )
+
+
+def enumerate_registry_tree(
+    hive: int,
+    root_path: str,
+    display_hive: str,
+) -> list[PolicyEntry]:
+    entries: list[PolicyEntry] = []
+
+    def walk(current_path: str) -> None:
+        child_names: list[str] = []
+
+        try:
+            with winreg.OpenKey(
+                hive,
+                current_path,
+                0,
+                winreg.KEY_READ,
+            ) as key:
+                info = winreg.QueryInfoKey(key)
+                value_count = info[1]
+                child_count = info[0]
+
+                for index in range(value_count):
+                    try:
+                        name, value, _ = winreg.EnumValue(
+                            key,
+                            index,
+                        )
+                    except OSError:
+                        continue
+
+                    entries.append(
+                        PolicyEntry(
+                            hive=display_hive,
+                            path=current_path,
+                            value_name=str(name),
+                            value=repr(value),
+                        )
+                    )
+
+                for index in range(child_count):
+                    try:
+                        child_names.append(
+                            winreg.EnumKey(key, index)
+                        )
+                    except OSError:
+                        continue
+
+        except (
+            FileNotFoundError,
+            PermissionError,
+            OSError,
+        ):
+            return
+
+        for child in child_names:
+            walk(
+                f"{current_path}\\{child}"
+            )
+
+    walk(root_path)
+    return entries
+
+
+def scan_policy_registry(
+    logger: Logger,
+) -> list[PolicyEntry]:
+    logger.info(
+        "Scanning Registry-based policy locations..."
+    )
+
+    entries: list[PolicyEntry] = []
+
+    for display_hive, root_path in POLICY_REGISTRY_ROOTS:
+        hive = (
+            winreg.HKEY_CURRENT_USER
+            if display_hive == "HKCU"
+            else winreg.HKEY_LOCAL_MACHINE
+        )
+
+        entries.extend(
+            enumerate_registry_tree(
+                hive,
+                root_path,
+                display_hive,
+            )
+        )
+
+    logger.info(
+        f"Registry scan found {len(entries)} policy value(s)."
+    )
+
+    return entries
+
+
+def collect_gpresult(
+    session: Session,
+    logger: Logger,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "available": command_exists("gpresult.exe"),
+        "return_code": None,
+        "text_report": None,
+        "html_report": None,
+        "xml_report": None,
+        "stdout": "",
+        "stderr": "",
+    }
+
+    if not result["available"]:
+        logger.warn(
+            "gpresult.exe was not found."
+        )
+        return result
+
+    text_report = session.directory / "gpresult.txt"
+    html_report = session.directory / "gpresult.html"
+    xml_report = session.directory / "gpresult.xml"
+
+    code, stdout, stderr = run_command(
+        ["gpresult.exe", "/r"],
+        timeout=120,
+    )
+
+    text_report.write_text(
+        f"Exit code: {code}\n\n"
+        f"STDOUT:\n{stdout}\n\n"
+        f"STDERR:\n{stderr}\n",
+        encoding="utf-8",
+    )
+
+    result.update(
+        {
+            "return_code": code,
+            "text_report": str(text_report),
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+    )
+
+    if code == 0:
+        logger.info(
+            f"gpresult text report saved to {text_report}."
+        )
+    else:
+        logger.warn(
+            f"gpresult /r returned exit code {code}."
+        )
+
+    html_code, _, html_stderr = run_command(
+        [
+            "gpresult.exe",
+            "/h",
+            str(html_report),
+            "/f",
+        ],
+        timeout=120,
+    )
+
+    if (
+        html_code == 0
+        and html_report.exists()
+    ):
+        result["html_report"] = str(html_report)
+        logger.info(
+            f"gpresult HTML report saved to {html_report}."
+        )
+    else:
+        logger.warn(
+            "gpresult HTML report could not be generated: "
+            f"{html_stderr.strip() or 'unknown error'}"
+        )
+
+    xml_code, _, xml_stderr = run_command(
+        [
+            "gpresult.exe",
+            "/x",
+            str(xml_report),
+            "/f",
+        ],
+        timeout=120,
+    )
+
+    if (
+        xml_code == 0
+        and xml_report.exists()
+    ):
+        result["xml_report"] = str(xml_report)
+        logger.info(
+            f"gpresult XML report saved to {xml_report}."
+        )
+    else:
+        logger.warn(
+            "gpresult XML report could not be generated: "
+            f"{xml_stderr.strip() or 'unknown error'}"
+        )
+
+    return result
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def _find_gpresult_name(element: ET.Element) -> str:
+    """Return a GPO name from an attribute or direct child element."""
+    name = (
+        element.attrib.get("Name")
+        or element.attrib.get("name")
+        or ""
+    ).strip()
+    if name:
+        return name
+
+    for child in element:
+        if _xml_local_name(str(child.tag)) == "name":
+            return (child.text or "").strip()
+
+    return ""
+
+
+def parse_gpresult_xml_applied_objects(
+    xml_report: str,
+) -> tuple[list[str], str]:
+    """Extract applied GPO names without relying on the Windows UI language."""
+    path = Path(xml_report)
+
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError, ValueError):
+        return [], "parse_failed"
+
+    names: list[str] = []
+    seen: set[str] = set()
+    result_sections = {"computerresults", "userresults"}
+    found_result_section = False
+
+    for results in root.iter():
+        if _xml_local_name(str(results.tag)) not in result_sections:
+            continue
+
+        found_result_section = True
+        for element in results.iter():
+            if _xml_local_name(str(element.tag)) != "gpo":
+                continue
+
+            name = _find_gpresult_name(element)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    if not found_result_section:
+        return [], "no_result_sections"
+
+    return names, "xml"
+
+
+def extract_applied_group_policy_objects(
+    gpresult: dict[str, Any],
+) -> tuple[list[str], str]:
+    """Extract applied GPO names from the structured gpresult XML report."""
+    xml_report = gpresult.get("xml_report")
+
+    if xml_report:
+        return parse_gpresult_xml_applied_objects(xml_report)
+
+    return [], "unavailable"
+
+
+def backup_registry(
+    session: Session,
+    logger: Logger,
+) -> list[str]:
+    directory = (
+        session.directory / "Registry"
+    )
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    created: list[str] = []
+
+    if not command_exists("reg.exe"):
+        logger.warn(
+            "reg.exe was not found."
+        )
+        return created
+
+    for display_hive, root_path in POLICY_REGISTRY_ROOTS:
+        safe_name = (
+            root_path
+            .replace("\\", "_")
+            .replace(" ", "_")
+        )
+
+        destination = (
+            directory
+            / f"{display_hive}_{safe_name}.reg"
+        )
+
+        code, stdout, stderr = run_command(
+            [
+                "reg.exe",
+                "export",
+                f"{display_hive}\\{root_path}",
+                str(destination),
+                "/y",
+            ],
+            timeout=90,
+        )
+
+        if (
+            code == 0
+            and destination.exists()
+        ):
+            created.append(str(destination))
+            logger.info(
+                f"Registry backup created: {destination}"
+            )
+        else:
+            logger.warn(
+                f"Registry backup failed for "
+                f"{display_hive}\\{root_path}: "
+                f"{stderr.strip() or stdout.strip() or 'unknown error'}"
+            )
+
+    return created
+
+
+def backup_local_group_policy(
+    session: Session,
+    logger: Logger,
+) -> tuple[bool, list[str]]:
+    directory = (
+        session.directory / "LocalGroupPolicy"
+    )
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    backed_up: list[str] = []
+
+    for source in LOCAL_GPO_DIRECTORIES:
+        destination = (
+            directory / source.name
+        )
+
+        if not source.exists():
+            # Record the absence because it is a valid state.
+            marker = (
+                destination.parent
+                / f"{source.name}.absent"
+            )
+            marker.write_text(
+                f"Source not present at backup time: {source}\n",
+                encoding="utf-8",
+            )
+            continue
+
+        try:
+            shutil.copytree(
+                source,
+                destination,
+            )
+            backed_up.append(str(destination))
+            logger.info(
+                f"Local Group Policy backup created: {destination}"
+            )
+        except OSError as exc:
+            logger.error(
+                f"Could not back up {source}: {exc}"
+            )
+            return False, backed_up
+
+    return True, backed_up
+
+
+def create_backup(
+    session: Session,
+    logger: Logger,
+) -> bool:
+    logger.info(
+        "Creating backup before policy removal..."
+    )
+
+    registry_backups = backup_registry(
+        session,
+        logger,
+    )
+
+    gpo_backup_ok, gpo_backups = (
+        backup_local_group_policy(
+            session,
+            logger,
+        )
+    )
+
+    manifest = {
+        "created_at": timestamp(),
+        "registry_backups": registry_backups,
+        "local_group_policy_backups": gpo_backups,
+        "local_group_policy_backup_success": gpo_backup_ok,
+    }
+
+    path = (
+        session.directory
+        / "backup-manifest.json"
+    )
+    path.write_text(
+        json.dumps(
+            manifest,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    if not gpo_backup_ok:
+        logger.error(
+            "Local Group Policy backup did not complete."
+        )
+        return False
+
+    logger.info(
+        f"Backup manifest saved to {path}."
+    )
+
+    return True
+
+
+def confirm_yes_no(
+    question: str,
+) -> bool:
+    while True:
+        answer = input(
+            f"{question} (Y/N): "
+        ).strip().lower()
+
+        if answer in {"y", "yes"}:
+            return True
+
+        if answer in {"n", "no"}:
+            return False
+
+        print(
+            "Please answer Yes (Y) or No (N)."
+        )
+
+
+def remove_directory_normal(
+    directory: Path,
+    logger: Logger,
+) -> tuple[bool, str]:
+    if not directory.exists():
+        return True, "Already absent"
+
+    try:
+        shutil.rmtree(directory)
+    except OSError as exc:
+        logger.warn(
+            f"Normal removal failed for {directory}: {exc}"
+        )
+        return False, str(exc)
+
+    if directory.exists():
+        return False, (
+            "The directory still exists after deletion."
+        )
+
+    logger.info(
+        f"Removed local Group Policy store: {directory}"
+    )
+    return True, "Removed successfully"
+
+
+def force_remove_directory(
+    directory: Path,
+    logger: Logger,
+) -> tuple[bool, str]:
+    if not directory.exists():
+        return True, "Already absent"
+
+    errors: list[str] = []
+
+    if command_exists("rmdir"):
+        code, stdout, stderr = run_command(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "rmdir",
+                "/s",
+                "/q",
+                str(directory),
+            ],
+            timeout=120,
+        )
+
+        if not directory.exists():
+            logger.info(
+                f"Forced local Group Policy removal succeeded: {directory}"
+            )
+            return True, "Removed successfully"
+
+        errors.append(
+            stderr.strip()
+            or stdout.strip()
+            or f"rmdir exit code {code}"
+        )
+
+    if command_exists("takeown.exe"):
+        _, stdout, stderr = run_command(
+            [
+                "takeown.exe",
+                "/f",
+                str(directory),
+                "/r",
+                "/d",
+                "Y",
+            ],
+            timeout=180,
+        )
+        if stderr.strip():
+            errors.append(
+                f"takeown: {stderr.strip()}"
+            )
+        elif stdout.strip():
+            logger.info(
+                stdout.strip()
+            )
+
+    if command_exists("icacls.exe"):
+        _, stdout, stderr = run_command(
+            [
+                "icacls.exe",
+                str(directory),
+                "/grant",
+                "*S-1-5-32-544:F",
+                "/t",
+                "/c",
+            ],
+            timeout=180,
+        )
+        if stderr.strip():
+            errors.append(
+                f"icacls: {stderr.strip()}"
+            )
+        elif stdout.strip():
+            logger.info(
+                stdout.strip()
+            )
+
+    code, stdout, stderr = run_command(
+        [
+            "cmd.exe",
+            "/d",
+            "/c",
+            "rmdir",
+            "/s",
+            "/q",
+            str(directory),
+        ],
+        timeout=120,
+    )
+
+    if not directory.exists():
+        logger.info(
+            "Forced removal succeeded after "
+            f"permission repair: {directory}"
+        )
+        return True, "Removed successfully after forced permission repair"
+
+    errors.append(
+        stderr.strip()
+        or stdout.strip()
+        or f"final rmdir exit code {code}"
+    )
+
+    reason = "; ".join(
+        item for item in errors if item
+    ) or "Unknown deletion error"
+
+    logger.error(
+        f"Force removal failed for {directory}: {reason}"
+    )
+
+    return False, reason
+
+
+def refresh_group_policy(
+    session: Session,
+    logger: Logger,
+) -> bool:
+    """Refresh both Computer and User Group Policy with gpupdate /force."""
+    if not command_exists("gpupdate.exe"):
+        logger.error("gpupdate.exe was not found.")
+        return False
+
+    code, stdout, stderr = run_command(
+        ["gpupdate.exe", "/force"],
+        timeout=300,
+    )
+
+    output_file = session.directory / "gpupdate.txt"
+    output_file.write_text(
+        f"Exit code: {code}\n\n"
+        f"STDOUT:\n{stdout}\n\n"
+        f"STDERR:\n{stderr}\n",
+        encoding="utf-8",
+    )
+    logger.info(
+        f"gpupdate output saved to {output_file}."
+    )
+
+    if code == 0:
+        logger.info("gpupdate /force completed successfully.")
+        return True
+
+    logger.error(
+        f"gpupdate /force failed with exit code {code}."
+    )
+    return False
+
+def local_gpo_status() -> dict[str, Any]:
+    present = [
+        str(path)
+        for path in LOCAL_GPO_DIRECTORIES
+        if path.exists()
+    ]
+
+    return {
+        "remaining_stores": present,
+        "remaining_count": len(present),
+    }
+
+
+def write_reset_report(
+    session: Session,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    failures: list[RemovalFailure],
+    forced_removed: list[str],
+    still_failed: list[RemovalFailure],
+    gpupdate_ok: bool | None,
+    management: ManagementState,
+    applied_objects: list[str],
+    applied_objects_source: str,
+    already_absent: list[str],
+    registry_before: list[PolicyEntry],
+    registry_after: list[PolicyEntry],
+) -> Path:
+    data = {
+        "application": APP_NAME,
+        "version": VERSION,
+        "completed_at": timestamp(),
+        "before": before,
+        "after": after,
+        "normal_removal_failures": [
+            asdict(item)
+            for item in failures
+        ],
+        "forced_removals": forced_removed,
+        "already_absent": already_absent,
+        "remaining_failures": [
+            asdict(item)
+            for item in still_failed
+        ],
+        "gpupdate_succeeded": gpupdate_ok,
+        "gpupdate_scope": "not_run_during_reset" if gpupdate_ok is None else "run_during_operation",
+        "operation_succeeded": not still_failed and not after["remaining_stores"],
+        "management": asdict(management),
+        "applied_group_policy_objects_reported": applied_objects,
+        "applied_group_policy_objects_source": applied_objects_source,
+        "registry_policy_values_before": [
+            item.full_path for item in registry_before
+        ],
+        "registry_policy_values_after": [
+            item.full_path for item in registry_after
+        ],
+        "registry_policy_values_remaining": [
+            item.full_path for item in registry_after
+        ],
+        "restart_recommended": bool(
+            before["remaining_count"] > 0
+            and not still_failed
+            and not remaining_stores
+        ),
+    }
+
+    path = (
+        session.directory
+        / "local_gpo_reset.json"
+    )
+    path.write_text(
+        json.dumps(
+            data,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def show_removal_result(
+    removed: list[str],
+    failures: list[RemovalFailure],
+    forced_removed: list[str],
+    still_failed: list[RemovalFailure],
+    gpupdate_ok: bool | None,
+    remaining_stores: list[str],
+    applied_objects: list[str],
+    applied_objects_source: str,
+    report: Path,
+    before_count: int,
+    already_absent: list[str],
+    registry_before_count: int,
+    registry_after_count: int,
+) -> None:
+    print()
+    print("=" * 78)
+
+    if before_count == 0 and not still_failed and not remaining_stores:
+        print("LOCAL GROUP POLICY ALREADY CLEAR")
+    elif (
+        before_count > 0
+        and not failures
+        and not still_failed
+        and not remaining_stores
+    ):
+        print("GROUP POLICIES REMOVED SUCCESSFULLY")
+    elif still_failed:
+        print("GROUP POLICY REMOVAL COMPLETED WITH ERRORS")
+    else:
+        print("GROUP POLICY REMOVAL COMPLETED")
+
+    print("=" * 78)
+
+    print("\nLocal Group Policy")
+    print(
+        f"  Removed successfully: {len(removed) + len(forced_removed)}"
+    )
+    print(f"  Removal failed: {len(still_failed)}")
+    print(
+        "  Status: "
+        + ("Already clear" if not remaining_stores else "Not clear")
+    )
+    print(f"  Stores remaining: {len(remaining_stores)}")
+
+    if failures:
+        print("\nNormal removal failures")
+        for item in failures:
+            print(f"  [FAIL] {item.path}")
+            print(f"         {item.reason}")
+
+    if forced_removed:
+        print("\nForced removal")
+        for item in forced_removed:
+            print(f"  [OK] {item}")
+
+    if still_failed:
+        print("\nStill not removed")
+        for item in still_failed:
+            print(f"  [FAIL] {item.path}")
+            print(f"         {item.reason}")
+
+    print("\nGroup Policy refresh")
+    if gpupdate_ok is None:
+        print("  gpupdate /force: Not run during reset")
+        print("  The reset deliberately does not reapply Group Policy.")
+    else:
+        print(
+            "  gpupdate /force: "
+            f"{'Successful' if gpupdate_ok else 'Failed'}"
+        )
+
+    print("\nVerification")
+    if remaining_stores:
+        for path in remaining_stores:
+            print(f"  [FAIL] Store remains: {path}")
+    else:
+        print(
+            "  [OK] Both local Group Policy stores are absent."
+        )
+
+    if applied_objects:
+        print("\nApplied Group Policy objects reported by gpresult:")
+        for item in applied_objects:
+            print(f"  - {item}")
+        print(
+            "\nRemote or organisation-controlled objects are "
+            "outside the local reset scope."
+        )
+    elif applied_objects_source == "xml":
+        print("\nApplied Group Policy objects reported by gpresult: 0")
+    elif applied_objects_source == "not_collected":
+        print("\nApplied Group Policy objects: Not collected during reset.")
+        print("  Run DIAGNOSE GROUP POLICY for a current gpresult report.")
+    elif applied_objects_source == "parse_failed":
+        print("\nWARNING: The gpresult XML could not be parsed. Review gpresult.xml.")
+    elif applied_objects_source == "no_result_sections":
+        print("\nWARNING: gpresult.xml did not contain UserResults or ComputerResults.")
+    else:
+        print("\nApplied Group Policy objects could not be collected.")
+
+    print("\nRegistry policy values")
+    print(f"  Before reset: {registry_before_count}")
+    print(f"  After reset: {registry_after_count}")
+    if registry_after_count:
+        print(
+            "  [INFO] These Registry values are reported separately "
+            "and are not used to determine whether Local Group Policy stores remain."
+        )
+
+    print()
+    stores_cleared = not still_failed and not remaining_stores
+
+    if before_count == 0 and stores_cleared:
+        print("No Local Group Policy stores were present before the operation.")
+    elif stores_cleared:
+        print("Local Group Policy stores removed successfully.")
+        print("Restart Windows before final verification.")
+    else:
+        print("Some Local Group Policy stores could not be fully removed.")
+        print("Review the failure details above and retry the failed operation.")
+
+    print(f"\nReport: {report}")
+
+
+def diagnose(
+    session: Session,
+    logger: Logger,
+) -> None:
+    print()
+    print("=" * 78)
+    print("GROUP POLICY DIAGNOSIS")
+    print("=" * 78)
+
+    system = system_summary()
+    management = detect_management_state()
+    registry_entries = scan_policy_registry(logger)
+    gpresult = collect_gpresult(
+        session,
+        logger,
+    )
+
+    print()
+    print("System")
+    print(
+        f"  Computer: {system['computer']}"
+    )
+    print(
+        f"  User: {system['user']}"
+    )
+    print(
+        f"  Administrator: {system['administrator']}"
+    )
+
+    print()
+    print("Management indicators")
+    print(
+        f"  Active Directory joined: "
+        f"{management.domain_joined}"
+    )
+    print(
+        f"  Microsoft Entra ID joined: "
+        f"{management.entra_joined}"
+    )
+    print(
+        f"  Enterprise joined: "
+        f"{management.enterprise_joined}"
+    )
+    print(
+        f"  MDM discovery URL present: "
+        f"{management.mdm_discovery_url_present}"
+    )
+    print(
+        f"  Management Registry locations: "
+        f"{len(management.registry_management_locations)}"
+    )
+
+    print()
+    print("Local Group Policy stores")
+    status = local_gpo_status()
+    if status["remaining_stores"]:
+        for path in status["remaining_stores"]:
+            print(f"  [PRESENT] {path}")
+    else:
+        print(
+            "  [OK] Both local stores are absent."
+        )
+
+    print()
+    print(
+        f"Registry policy values found: "
+        f"{len(registry_entries)}"
+    )
+
+    applied_objects, applied_objects_source = (
+        extract_applied_group_policy_objects(gpresult)
+    )
+
+    if applied_objects:
+        print("\nApplied Group Policy objects reported by gpresult:")
+        for item in applied_objects:
+            print(f"  - {item}")
+    elif applied_objects_source == "xml":
+        print("\nApplied Group Policy objects reported by gpresult: 0")
+    elif applied_objects_source == "parse_failed":
+        print("\nWARNING: The gpresult XML could not be parsed. Review gpresult.xml.")
+    elif applied_objects_source == "no_result_sections":
+        print("\nWARNING: gpresult.xml did not contain UserResults or ComputerResults.")
+    else:
+        print("\nApplied Group Policy objects could not be collected.")
+
+    if management.organisation_managed_indicator:
+        print()
+        print(
+            "WARNING: an organisation-management indicator "
+            "was detected."
+        )
+        print(
+            "The local reset cannot remove remote policy."
+        )
+
+    report = (
+        session.directory
+        / "diagnostic.json"
+    )
+
+    report.write_text(
+        json.dumps(
+            {
+                "application": APP_NAME,
+                "version": VERSION,
+                "created_at": timestamp(),
+                "system": system,
+                "management": asdict(
+                    management
+                ),
+                "local_gpo_status": status,
+                "registry_policy_value_count": len(
+                    registry_entries
+                ),
+                "gpresult": gpresult,
+                "applied_group_policy_objects": applied_objects,
+                "applied_group_policy_objects_source": applied_objects_source,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    logger.info(
+        f"Diagnostic report saved to {report}."
+    )
+
+    input(
+        "\nPress Enter to return to the main menu..."
+    )
+
+
+def remove_all_local_group_policy(
+    session: Session,
+    logger: Logger,
+) -> None:
+    print()
+    print("=" * 78)
+    print("REMOVE LOCAL GROUP POLICY")
+    print("=" * 78)
+    print()
+    print(
+        "This removes Local Group Policy for:"
+    )
+    print(
+        "  - Computer"
+    )
+    print(
+        "  - User"
+    )
+    print()
+    print(
+        "A backup will be created before any removal."
+    )
+    print(
+        "Remote Active Directory, Microsoft Entra ID and MDM "
+        "policy are outside the scope of this operation."
+    )
+    print()
+
+    management = detect_management_state()
+
+    if management.organisation_managed_indicator:
+        print(
+            "Warning: organisation-level management indicators "
+            "were detected."
+        )
+        print(
+            "Local removal may succeed while remote policy "
+            "is later reapplied."
+        )
+        print()
+
+    if not confirm_yes_no(
+        "Continue with Local Group Policy removal and backup?"
+    ):
+        logger.info(
+            "Local Group Policy removal cancelled."
+        )
+        print(
+            "\nOperation cancelled."
+        )
+        input(
+            "\nPress Enter to return to the main menu..."
+        )
+        return
+
+    before = local_gpo_status()
+    registry_before = scan_policy_registry(logger)
+
+    if not create_backup(
+        session,
+        logger,
+    ):
+        print()
+        print(
+            "Backup failed. No Group Policy removal was performed."
+        )
+        input(
+            "\nPress Enter to return to the main menu..."
+        )
+        return
+
+    removed: list[str] = []
+    already_absent: list[str] = []
+    failures: list[RemovalFailure] = []
+
+    for directory in LOCAL_GPO_DIRECTORIES:
+        if not directory.exists():
+            already_absent.append(str(directory))
+            continue
+
+        success, reason = remove_directory_normal(
+            directory,
+            logger,
+        )
+
+        if success:
+            removed.append(str(directory))
+        else:
+            failures.append(
+                RemovalFailure(
+                    path=str(directory),
+                    reason=reason,
+                )
+            )
+
+    forced_removed: list[str] = []
+    still_failed: list[RemovalFailure] = []
+
+    if failures:
+        print()
+        print(
+            f"{len(failures)} local Group Policy store(s) "
+            "could not be removed normally."
+        )
+
+        if confirm_yes_no(
+            "Force removal of the failed local Group Policy stores?"
+        ):
+            for failure in failures:
+                success, reason = (
+                    force_remove_directory(
+                        Path(failure.path),
+                        logger,
+                    )
+                )
+
+                if success:
+                    forced_removed.append(
+                        failure.path
+                    )
+                else:
+                    still_failed.append(
+                        RemovalFailure(
+                            path=failure.path,
+                            reason=reason,
+                        )
+                    )
+        else:
+            still_failed = failures
+
+    print()
+    print(
+        "Verifying Local Group Policy stores..."
+    )
+
+    after = local_gpo_status()
+    registry_after = scan_policy_registry(logger)
+
+    report = write_reset_report(
+        session,
+        before,
+        after,
+        failures,
+        forced_removed,
+        still_failed,
+        None,
+        management,
+        [],
+        "not_collected",
+        already_absent,
+        registry_before,
+        registry_after,
+    )
+
+    show_removal_result(
+        removed,
+        failures,
+        forced_removed,
+        still_failed,
+        None,
+        after["remaining_stores"],
+        [],
+        "not_collected",
+        report,
+        before["remaining_count"],
+        already_absent,
+        len(registry_before),
+        len(registry_after),
+    )
+
+    input(
+        "\nPress Enter to return to the main menu..."
+    )
+
+
+def write_json_report(
+    session: Session,
+    filename: str,
+    data: dict[str, Any],
+) -> Path:
+    """Write an operation report as UTF-8 JSON."""
+    path = session.directory / filename
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_restore_report(
+    session: Session,
+    selected: Path,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    restore_errors: list[str],
+    gpupdate_ok: bool,
+    expected_present: list[str],
+) -> Path:
+    state_matches = set(after["remaining_stores"]) == set(expected_present)
+    operation_succeeded = (
+        not restore_errors
+        and state_matches
+        and gpupdate_ok
+    )
+    data = {
+        "application": APP_NAME,
+        "version": VERSION,
+        "operation": "restore_local_group_policy",
+        "completed_at": timestamp(),
+        "source_backup": str(selected),
+        "expected_present_stores": expected_present,
+        "before": before,
+        "after": after,
+        "restore_errors": restore_errors,
+        "gpupdate_succeeded": gpupdate_ok,
+        "verification_passed": state_matches,
+        "operation_succeeded": operation_succeeded,
+    }
+    return write_json_report(session, "restore.json", data)
+
+
+def write_refresh_report(
+    session: Session,
+    gpupdate_ok: bool,
+) -> Path:
+    data = {
+        "application": APP_NAME,
+        "version": VERSION,
+        "operation": "refresh_group_policy",
+        "completed_at": timestamp(),
+        "gpupdate_succeeded": gpupdate_ok,
+        "output_file": str(session.directory / "gpupdate.txt"),
+    }
+    return write_json_report(session, "gpupdate.json", data)
+
+
+def restore_backup(
+    logger: Logger,
+) -> None:
+    sessions = (
+        sorted(
+            (
+                path
+                for path in SESSION_ROOT.iterdir()
+                if path.is_dir()
+                and (path / "LocalGroupPolicy").exists()
+            ),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        if SESSION_ROOT.exists()
+        else []
+    )
+
+    if not sessions:
+        print("\nNo PolicyReset backup sessions were found.")
+        input("\nPress Enter to return to the main menu...")
+        return
+
+    print()
+    print("=" * 78)
+    print("RESTORE GROUP POLICY BACKUP")
+    print("=" * 78)
+    print()
+
+    for index, path in enumerate(sessions, start=1):
+        print(f"[{index}] {path.name}")
+
+    print()
+    print("Press Enter to cancel.")
+    raw = input("Select backup: ").strip()
+
+    if not raw:
+        logger.info("Backup restoration cancelled.")
+        return
+
+    try:
+        selected = sessions[int(raw) - 1]
+    except (ValueError, IndexError):
+        print("\nInvalid selection.")
+        input("\nPress Enter to return to the main menu...")
+        return
+
+    backup_root = selected / "LocalGroupPolicy"
+    if not backup_root.exists():
+        print("\nThe selected session does not contain a Local Group Policy backup.")
+        input("\nPress Enter to return to the main menu...")
+        return
+
+    expected_present = [
+        str(directory)
+        for directory in LOCAL_GPO_DIRECTORIES
+        if (backup_root / directory.name).is_dir()
+    ]
+
+    print()
+    print(f"Backup selected: {selected.name}")
+    if expected_present:
+        print("Restoration will replace the current local Group Policy stores:")
+        for path in expected_present:
+            print(f"  - {path}")
+    else:
+        print(
+            "The selected backup contains no Local Group Policy stores. "
+            "Restoration will leave both stores absent."
+        )
+
+    if not confirm_yes_no("Continue with backup restoration?"):
+        logger.info("Backup restoration cancelled.")
+        return
+
+    session = create_session()
+    before = local_gpo_status()
+
+    # Protect the current state before changing it.
+    if not create_backup(session, logger):
+        print("\nSafety backup failed. Restoration was cancelled.")
+        input("\nPress Enter to return to the main menu...")
+        return
+
+    restore_errors: list[str] = []
+
+    for directory in LOCAL_GPO_DIRECTORIES:
+        current = directory
+        backup = backup_root / directory.name
+
+        if current.exists():
+            success, reason = remove_directory_normal(current, logger)
+            if not success:
+                restore_errors.append(
+                    f"{current}: could not replace current store: {reason}"
+                )
+                continue
+
+        if backup.exists():
+            try:
+                shutil.copytree(backup, current)
+                logger.info(f"Restored local Group Policy store: {current}")
+            except OSError as exc:
+                restore_errors.append(f"{current}: {exc}")
+
+    after = local_gpo_status()
+    expected_set = set(expected_present)
+    actual_set = set(after["remaining_stores"])
+
+    if actual_set != expected_set:
+        missing = sorted(expected_set - actual_set)
+        unexpected = sorted(actual_set - expected_set)
+        if missing:
+            restore_errors.append(
+                "Expected stores were not restored: " + "; ".join(missing)
+            )
+        if unexpected:
+            restore_errors.append(
+                "Unexpected stores remain: " + "; ".join(unexpected)
+            )
+
+    restored_state_matches = not restore_errors and actual_set == expected_set
+    gpupdate_ok = refresh_group_policy(session, logger)
+    report = write_restore_report(
+        session,
+        selected,
+        before,
+        after,
+        restore_errors,
+        gpupdate_ok,
+        expected_present,
+    )
+
+    print()
+    print("=" * 78)
+    if restored_state_matches and gpupdate_ok:
+        print("GROUP POLICY BACKUP RESTORED SUCCESSFULLY")
+    else:
+        print("GROUP POLICY BACKUP RESTORATION COMPLETED WITH ERRORS")
+    print("=" * 78)
+
+    if restore_errors:
+        print("\nErrors")
+        for error in restore_errors:
+            print(f"  [FAIL] {error}")
+
+    print(
+        "\nLocal Group Policy stores: "
+        f"{'Verified' if restored_state_matches else 'Not verified'}"
+    )
+    print(f"gpupdate /force: {'Successful' if gpupdate_ok else 'Failed'}")
+    print(f"\nSafety backup created in: {session.directory}")
+    print(f"Restore report: {report}")
+
+    input("\nPress Enter to return to the main menu...")
+
+
+def show_latest_report() -> None:
+    candidates = (
+        sorted(
+            (
+                path
+                for pattern in ("diagnostic.json", "local_gpo_reset.json", "restore.json", "gpupdate.json")
+                for path in SESSION_ROOT.glob(f"*/{pattern}")
+            ),
+            key=lambda path: (
+                path.parent.name,
+                path.name,
+            ),
+            reverse=True,
+        )
+        if SESSION_ROOT.exists()
+        else []
+    )
+
+    if not candidates:
+        print(
+            "\nNo PolicyReset report is available."
+        )
+        input(
+            "\nPress Enter to return to the main menu..."
+        )
+        return
+
+    print()
+    print(
+        f"Latest report: {candidates[0]}"
+    )
+    print()
+
+    try:
+        report = json.loads(
+            candidates[0].read_text(
+                encoding="utf-8"
+            )
+        )
+        print(
+            json.dumps(
+                report,
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    except (
+        OSError,
+        ValueError,
+    ) as exc:
+        print(
+            f"Could not read the report: {exc}"
+        )
+
+    input(
+        "\nPress Enter to return to the main menu..."
+    )
+
+
+def print_header() -> None:
+    print()
+    print("=" * 78)
+    print(f"{APP_NAME} {VERSION}")
+    print("Windows Local Group Policy Reset Utility")
+    print("=" * 78)
+
+
+
+def _powershell_quote(value: str) -> str:
+    """Escape a value for a PowerShell single-quoted string."""
+    return value.replace("'", "''")
+
+
+def _find_python_console_executable() -> str:
+    """Return python.exe matching the current interpreter installation."""
+    current = Path(sys.executable)
+    candidate = current.with_name("python.exe")
+
+    if candidate.exists():
+        return str(candidate)
+
+    found = shutil.which("python.exe")
+    if found:
+        return found
+
+    raise PolicyResetError(
+        "python.exe could not be located."
+    )
+
+
+def _find_powershell_executable() -> str:
+    """Prefer PowerShell 7 and fall back to Windows PowerShell."""
+    for name in ("pwsh.exe", "powershell.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    raise PolicyResetError(
+        "PowerShell could not be located."
+    )
+
+
+def _launch_persistent_powershell() -> None:
+    """Launch an elevated persistent PowerShell console for PolicyReset."""
+    python_exe = _powershell_quote(
+        _find_python_console_executable()
+    )
+    script = _powershell_quote(
+        str(Path(__file__).resolve())
+    )
+    command = (
+        f"& '{python_exe}' '{script}' --console"
+    )
+
+    import base64
+
+    encoded = base64.b64encode(
+        command.encode("utf-16le")
+    ).decode("ascii")
+
+    powershell = _find_powershell_executable()
+    working_directory = str(Path(__file__).resolve().parent)
+
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            powershell,
+            f"-NoProfile -NoExit -EncodedCommand {encoded}",
+            working_directory,
+            1,
+        )
+    except OSError as exc:
+        raise PolicyResetError(
+            f"Could not launch elevated PowerShell: {exc}"
+        ) from exc
+
+    if result <= 32:
+        raise PolicyResetError(
+            "Windows could not launch the elevated PowerShell console "
+            f"(ShellExecuteW code {result})."
+        )
+
+
+def _bootstrap_pyw() -> None:
+    """Ensure PolicyReset enters an elevated PowerShell console."""
+    if "--console" in sys.argv:
+        return
+
+    if not is_windows():
+        return
+
+    # A .pyw launched by Explorer normally has no console. In that case,
+    # request UAC elevation while launching the persistent PowerShell window.
+    if sys.stdout is None:
+        _launch_persistent_powershell()
+        raise SystemExit(0)
+
+    # A direct launch from a non-elevated PowerShell cannot elevate the same
+    # process. Start a new elevated PowerShell and continue there instead of
+    # asking the user to reopen PowerShell manually.
+    if not is_admin():
+        _launch_persistent_powershell()
+        raise SystemExit(0)
+
+
+def main() -> int:
+    _bootstrap_pyw()
+
+    if not is_windows():
+        print(
+            "PolicyReset can only run on Windows."
+        )
+        return 1
+
+    configure_console()
+
+    if not is_admin():
+        print("Unable to obtain administrator privileges. PolicyReset cannot continue.")
+        return 1
+
+    print_header()
+
+    application_session = create_session()
+    logger = Logger(
+        application_session.log_file
+    )
+
+    logger.info(
+        f"{APP_NAME} {VERSION} started."
+    )
+    logger.info(
+        f"Application session directory: {application_session.directory}"
+    )
+
+    while True:
+        try:
+            print()
+            print(
+                "[1] DIAGNOSE GROUP POLICY: Scan User and Computer and create report"
+            )
+            print(
+                "[2] REMOVE ALL LOCAL GROUP POLICY AND BACKUP: Remove and verify"
+            )
+            print(
+                "[3] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup"
+            )
+            print(
+                "[4] VIEW LATEST POLICYRESET REPORT: Display the latest operation report"
+            )
+            print(
+                "[5] REFRESH GROUP POLICY: Run gpupdate /force separately"
+            )
+            print(
+                "[0] EXIT"
+            )
+
+            choice = input(
+                "\nSelect an option: "
+            ).strip()
+
+            if choice == "1":
+                operation_session = create_session()
+                diagnose(
+                    operation_session,
+                    logger,
+                )
+
+            elif choice == "2":
+                operation_session = create_session()
+                remove_all_local_group_policy(
+                    operation_session,
+                    logger,
+                )
+
+            elif choice == "3":
+                restore_backup(
+                    logger,
+                )
+
+            elif choice == "4":
+                show_latest_report()
+
+            elif choice == "5":
+                operation_session = create_session()
+                print()
+                print("=" * 78)
+                print("REFRESH GROUP POLICY")
+                print("=" * 78)
+                print()
+                print(
+                    "This is a separate operation. It reapplies available "
+                    "User and Computer Group Policy with gpupdate /force."
+                )
