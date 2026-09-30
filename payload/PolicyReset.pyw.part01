@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""
+PolicyReset 4.2.4
+
+Windows Local Group Policy diagnostic, backup, reset and verification utility.
+
+The application is designed to run entirely in PowerShell. When launched by
+Windows through the .pyw file association, it opens a persistent PowerShell
+console and re-executes itself with python.exe. When started directly from an
+existing PowerShell console with python.exe, it stays in that same console.
+
+Scope:
+    - Local Group Policy for the current Computer and User.
+    - Backup before modification.
+    - Verification after modification.
+    - Group Policy refresh as a separate explicit operation.
+    - Optional forced removal only for local Group Policy stores that failed
+      normal removal.
+
+PolicyReset does not remove or bypass Active Directory, Microsoft Entra ID,
+MDM, Intune or other remote organisation-controlled policy.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import datetime as dt
+import json
+import locale
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import winreg
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
+from typing import Any
+
+
+APP_NAME = "PolicyReset"
+VERSION = "4.2.4"
+
+DATA_ROOT = (
+    Path(os.environ.get("ProgramData", r"C:ProgramData"))
+    / APP_NAME
+)
+
+SESSION_ROOT = DATA_ROOT / "Sessions"
+LOG_ROOT = DATA_ROOT / "Logs"
+
+LOCAL_GPO_DIRECTORIES = (
+    Path(os.environ.get("WINDIR", r"C:Windows"))
+    / "System32"
+    / "GroupPolicy",
+    Path(os.environ.get("WINDIR", r"C:Windows"))
+    / "System32"
+    / "GroupPolicyUsers",
+)
+
+POLICY_REGISTRY_ROOTS = (
+    ("HKCU", r"SoftwarePolicies"),
+    (
+        "HKCU",
+        r"SoftwareMicrosoftWindowsCurrentVersionPolicies",
+    ),
+    ("HKLM", r"SOFTWAREPolicies"),
+    (
+        "HKLM",
+        r"SOFTWAREMicrosoftWindowsCurrentVersionPolicies",
+    ),
+)
+
+MANAGEMENT_KEYS = (
+    (
+        r"HKLMSOFTWAREMicrosoftEnrollments",
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWAREMicrosoftEnrollments",
+    ),
+    (
+        r"HKLMSOFTWAREMicrosoftPolicyManager",
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWAREMicrosoftPolicyManager",
+    ),
+    (
+        r"HKLMSOFTWAREMicrosoftProvisioningOMADMAccounts",
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWAREMicrosoftProvisioningOMADMAccounts",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class PolicyEntry:
+    hive: str
+    path: str
+    value_name: str
+    value: str
+
+    @property
+    def full_path(self) -> str:
+        return f"{self.hive}\{self.path}\{self.value_name}"
+
+
+@dataclass(frozen=True)
+class ManagementState:
+    domain_joined: bool
+    entra_joined: bool
+    enterprise_joined: bool
+    mdm_discovery_url_present: bool
+    registry_management_locations: tuple[str, ...]
+
+    @property
+    def organisation_managed_indicator(self) -> bool:
+        return any(
+            (
+                self.domain_joined,
+                self.entra_joined,
+                self.enterprise_joined,
+                self.mdm_discovery_url_present,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class RemovalFailure:
+    path: str
+    reason: str
+
+
+@dataclass
+class Session:
+    directory: Path
+    log_file: Path
+
+
+class PolicyResetError(RuntimeError):
+    """Expected PolicyReset error."""
+
+
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def is_admin() -> bool:
+    if not is_windows():
+        return False
+
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except OSError:
+        return False
+
+
+def configure_console() -> None:
+    """Keep output readable in the existing PowerShell console."""
+    preferred = locale.getpreferredencoding(False)
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except (AttributeError, OSError):
+            continue
+
+    if preferred:
+        # Keep the preferred encoding available for diagnostics.
+        pass
+
+
+def timestamp() -> str:
+    return dt.datetime.now().astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S %z"
+    )
+
+
+def session_timestamp() -> str:
+    return dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+
+def create_session() -> Session:
+    session_directory = SESSION_ROOT / session_timestamp()
+    session_directory.mkdir(parents=True, exist_ok=True)
+
+    LOG_ROOT.mkdir(parents=True, exist_ok=True)
+
+    log_file = (
+        LOG_ROOT
+        / f"PolicyReset_{session_directory.name}.log"
+    )
+
+    return Session(
+        directory=session_directory,
+        log_file=log_file,
+    )
+
+
+class Logger:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write(self, level: str, message: str) -> None:
+        line = f"[{timestamp()}] [{level}] {message}"
+        print(line)
+        with self.path.open(
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(line + "\n")
+
+    def info(self, message: str) -> None:
+        self.write("INFO", message)
+
+    def warn(self, message: str) -> None:
+        self.write("WARN", message)
+
+    def error(self, message: str) -> None:
+        self.write("ERROR", message)
+
+
+def command_exists(command: str) -> bool:
+    return shutil.which(command) is not None
+
+
+def _windows_output_encodings() -> list[str]:
+    """Return likely encodings for native Windows command output."""
+    encodings: list[str] = []
+
+    if is_windows():
+        try:
+            console_code_page = int(
+                ctypes.windll.kernel32.GetConsoleOutputCP()
+            )
+        except (OSError, AttributeError):
+            console_code_page = 0
+
+        try:
+            oem_code_page = int(
+                ctypes.windll.kernel32.GetOEMCP()
+            )
+        except (OSError, AttributeError):
+            oem_code_page = 0
+
+        for code_page in (console_code_page, oem_code_page):
+            if code_page:
+                encodings.append(f"cp{code_page}")
+
+    encodings.extend(
+        [
+            locale.getpreferredencoding(False),
+            "cp850",
+            "cp1252",
+            "utf-8",
+        ]
+    )
+    return encodings
+
+
+def decode_output(data: bytes) -> str:
+    """Decode native Windows command output without common mojibake."""
+    seen: set[str] = set()
+
+    for encoding in _windows_output_encodings():
+        if not encoding:
+            continue
+
+        normalised = encoding.lower()
+        if normalised in seen:
+            continue
+        seen.add(normalised)
+
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return data.decode("utf-8", errors="replace")
+
+
+def run_command(
+    command: list[str],
+    *,
+    timeout: int,
+) -> tuple[int, str, str]:
+    process = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        creationflags=getattr(
+            subprocess,
+            "CREATE_NO_WINDOW",
+            0,
+        ),
+    )
+
+    return (
+        process.returncode,
+        decode_output(process.stdout),
+        decode_output(process.stderr),
+    )
+
+
+
+def system_summary() -> dict[str, Any]:
+    return {
+        "computer": os.environ.get(
+            "COMPUTERNAME",
+            "Unknown",
+        ),
+        "user": os.environ.get(
+            "USERNAME",
+            "Unknown",
+        ),
+        "administrator": is_admin(),
+        "windows_directory": os.environ.get(
+            "WINDIR",
+            r"C:Windows",
+        ),
+        "python_version": sys.version.split()[0],
+    }
+
+
+def detect_management_state() -> ManagementState:
+    domain_joined = False
+    entra_joined = False
+    enterprise_joined = False
+    mdm_discovery = False
+
+    if command_exists("dsregcmd.exe"):
+        _, stdout, stderr = run_command(
+            ["dsregcmd.exe", "/status"],
+            timeout=30,
+        )
+
+        values: dict[str, str]
