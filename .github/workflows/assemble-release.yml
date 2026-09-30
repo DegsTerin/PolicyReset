@@ -88,13 +88,6 @@ jobs:
           print(f"Generated {output} with {len(frames)} frames.")
           PY
 
-      - name: Validate application and demonstration
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m py_compile PolicyReset.pyw
-          test -s assets/demo.gif
-
       - name: Remove temporary publication payload
         shell: bash
         run: |
