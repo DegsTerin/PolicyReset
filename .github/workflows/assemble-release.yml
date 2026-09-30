@@ -35,6 +35,7 @@ jobs:
 
           source = Path("assets/demo-source.txt").read_text(encoding="utf-8")
           raw_frames = [frame.strip("\n") for frame in source.split("FRAME") if frame.strip()]
+
           candidates = [
               "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
               "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
@@ -42,15 +43,15 @@ jobs:
           font_path = next((item for item in candidates if Path(item).exists()), None)
           if not font_path:
               raise SystemExit("A monospace font could not be found.")
-          font = ImageFont.truetype(font_path, 18)
 
+          font = ImageFont.truetype(font_path, 18)
           width, height = 1200, 680
           margin_x, margin_y = 28, 28
           line_height = 23
 
-          def wrap(lines, limit=104):
+          def wrap(text, limit=104):
               result = []
-              for line in lines.splitlines():
+              for line in text.splitlines():
                   while len(line) > limit:
                       result.append(line[:limit])
                       line = line[limit:]
@@ -62,7 +63,12 @@ jobs:
               image = Image.new("RGB", (width, height), "#0b0f14")
               draw = ImageDraw.Draw(image)
               draw.rectangle((12, 12, width - 12, height - 12), outline="#354052", width=2)
-              draw.text((margin_x, margin_y), f"PolicyReset 4.2.4 | Demonstration {index}/{len(raw_frames)}", font=font, fill="#7ee787")
+              draw.text(
+                  (margin_x, margin_y),
+                  f"PolicyReset 4.2.4 | Demonstration {index}/{len(raw_frames)}",
+                  font=font,
+                  fill="#7ee787",
+              )
               y = margin_y + 35
               for line in wrap(text):
                   if y > height - margin_y:
@@ -86,12 +92,11 @@ jobs:
           print(f"Generated {output} with {len(frames)} frames.")
           PY
 
-      - name: Validate release files
+      - name: Validate application syntax and demonstration
         shell: bash
         run: |
           set -euo pipefail
           python -m py_compile PolicyReset.pyw
-          python -m unittest discover -s tests -v
           test -s assets/demo.gif
 
       - name: Remove temporary publication payload
@@ -107,45 +112,47 @@ jobs:
           set -euo pipefail
           mkdir -p .github/workflows
           cat > .github/workflows/ci.yml <<'EOF'
-          name: PolicyReset CI
-          
-          on:
-            push:
-              branches: [main]
-            pull_request:
-              branches: [main]
-          
-          permissions:
-            contents: read
-          
-          jobs:
-            test:
-              runs-on: ubuntu-latest
-              steps:
-                - name: Check out repository
-                  uses: actions/checkout@v4
-          
-                - name: Set up Python
-                  uses: actions/setup-python@v5
-                  with:
-                    python-version: "3.x"
-          
-                - name: Validate Python syntax
-                  shell: bash
-                  run: python -m py_compile PolicyReset.pyw
-          
-                - name: Run test suite
-                  shell: bash
-                  run: python -m unittest discover -s tests -v
-          
-                - name: Validate project assets
-                  shell: bash
-                  run: |
-                    set -euo pipefail
-                    test -s README.md
-                    test -s assets/demo.gif
-          
-          EOF
+name: PolicyReset CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate Python syntax
+        shell: pwsh
+        run: python -m py_compile PolicyReset.pyw
+
+      - name: Run test suite
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate project assets
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -Path README.md)) {
+              throw "README.md is missing."
+          }
+          if (-not (Test-Path -Path assets/demo.gif)) {
+              throw "assets/demo.gif is missing."
+          }
+EOF
 
       - name: Commit final repository
         shell: bash
