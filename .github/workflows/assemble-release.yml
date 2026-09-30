@@ -23,10 +23,11 @@ jobs:
         shell: bash
         run: python -m pip install --disable-pip-version-check --quiet pillow
 
-      - name: Generate terminal demonstration GIF
+      - name: Generate demonstration GIF
         shell: bash
         run: |
           set -euo pipefail
+          test -s assets/demo-source.txt
 
           python - <<'PY'
           from pathlib import Path
@@ -34,54 +35,44 @@ jobs:
 
           source = Path("assets/demo-source.txt").read_text(encoding="utf-8")
           raw_frames = [frame.strip("\n") for frame in source.split("FRAME") if frame.strip()]
-
-          font_candidates = [
+          candidates = [
               "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
               "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
           ]
-
-          font_path = next((path for path in font_candidates if Path(path).exists()), None)
-          if font_path is None:
-              raise SystemExit("A monospace font could not be found on the runner.")
-
+          font_path = next((item for item in candidates if Path(item).exists()), None)
+          if not font_path:
+              raise SystemExit("A monospace font could not be found.")
           font = ImageFont.truetype(font_path, 18)
+
           width, height = 1200, 680
           margin_x, margin_y = 28, 28
           line_height = 23
 
-          def fit_lines(text: str, max_chars: int = 104) -> list[str]:
-              output = []
-              for line in text.splitlines():
-                  while len(line) > max_chars:
-                      output.append(line[:max_chars])
-                      line = line[max_chars:]
-                  output.append(line)
-              return output
+          def wrap(lines, limit=104):
+              result = []
+              for line in lines.splitlines():
+                  while len(line) > limit:
+                      result.append(line[:limit])
+                      line = line[limit:]
+                  result.append(line)
+              return result
 
           frames = []
-          for index, text in enumerate(raw_frames):
+          for index, text in enumerate(raw_frames, start=1):
               image = Image.new("RGB", (width, height), "#0b0f14")
               draw = ImageDraw.Draw(image)
-
               draw.rectangle((12, 12, width - 12, height - 12), outline="#354052", width=2)
-              draw.text(
-                  (margin_x, margin_y),
-                  f"PolicyReset 4.2.4  |  Demonstration {index + 1}/{len(raw_frames)}",
-                  font=font,
-                  fill="#7ee787",
-              )
-
+              draw.text((margin_x, margin_y), f"PolicyReset 4.2.4 | Demonstration {index}/{len(raw_frames)}", font=font, fill="#7ee787")
               y = margin_y + 35
-              for line in fit_lines(text):
+              for line in wrap(text):
                   if y > height - margin_y:
                       break
                   draw.text((margin_x, y), line, font=font, fill="#e6edf3")
                   y += line_height
-
               frames.append(image)
 
-          if not frames:
-              raise SystemExit("No demonstration frames were found.")
+          if len(frames) < 2:
+              raise SystemExit("The demonstration needs at least two frames.")
 
           output = Path("assets/demo.gif")
           frames[0].save(
@@ -95,7 +86,7 @@ jobs:
           print(f"Generated {output} with {len(frames)} frames.")
           PY
 
-      - name: Validate source and tests
+      - name: Validate release files
         shell: bash
         run: |
           set -euo pipefail
@@ -103,59 +94,68 @@ jobs:
           python -m unittest discover -s tests -v
           test -s assets/demo.gif
 
-      - name: Finalise repository as normal CI
+      - name: Remove temporary publication payload
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf payload
+          rm -f assets/demo-source.txt
 
+      - name: Install permanent CI workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .github/workflows
           cat > .github/workflows/ci.yml <<'EOF'
           name: PolicyReset CI
+          
+          on:
+            push:
+              branches: [main]
+            pull_request:
+              branches: [main]
+          
+          permissions:
+            contents: read
+          
+          jobs:
+            test:
+              runs-on: ubuntu-latest
+              steps:
+                - name: Check out repository
+                  uses: actions/checkout@v4
+          
+                - name: Set up Python
+                  uses: actions/setup-python@v5
+                  with:
+                    python-version: "3.x"
+          
+                - name: Validate Python syntax
+                  shell: bash
+                  run: python -m py_compile PolicyReset.pyw
+          
+                - name: Run test suite
+                  shell: bash
+                  run: python -m unittest discover -s tests -v
+          
+                - name: Validate project assets
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    test -s README.md
+                    test -s assets/demo.gif
+          
+          EOF
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Validate Python syntax
-        shell: bash
-        run: python -m py_compile PolicyReset.pyw
-
-      - name: Run test suite
-        shell: bash
-        run: python -m unittest discover -s tests -v
-
-      - name: Validate project assets
+      - name: Commit final repository
         shell: bash
         run: |
           set -euo pipefail
-          test -s assets/demo.gif
-          test -s README.md
-
-          EOF
-
-          rm -f .github/workflows/assemble-release.yml
-          rm -f assets/demo-source.txt
-          rm -rf payload
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
-          git commit -m "Add PolicyReset demonstration and CI [skip ci]"
+          git rm -f .github/workflows/assemble-release.yml
+          git commit -m "Add PolicyReset demonstration and CI [skip ci]" || exit 0
           git push
