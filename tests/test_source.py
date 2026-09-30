@@ -20,7 +20,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.2.4"', self.source)
+        self.assertIn('VERSION = "4.2.5"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -97,7 +97,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.2.4"', metadata)
+        self.assertIn('version = "4.2.5"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
