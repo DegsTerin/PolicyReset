@@ -1,3 +1,10 @@
+## 4.2.5 - 2026-09-30
+
+### Fixed
+
+- Selecting `[0] EXIT` now closes the dedicated PowerShell console opened by `PolicyReset.pyw`.
+- Running PolicyReset from an existing PowerShell session still leaves the parent terminal open.
+
 ## 4.2.4 - 2026-09-30
 
 - Simplified Local Group Policy removal output to distinguish actual removals from an already-clear state.
