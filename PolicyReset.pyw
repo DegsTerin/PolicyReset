@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.2.4
+PolicyReset 4.2.5
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
 The application is designed to run entirely in PowerShell. When launched by
-Windows through the .pyw file association, it opens a persistent PowerShell
-console and re-executes itself with python.exe. When started directly from an
+Windows through the .pyw file association, it opens a PowerShell console for the application
+and re-executes itself with python.exe. When started directly from an
 existing PowerShell console with python.exe, it stays in that same console.
 
 Scope:
@@ -39,7 +39,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.2.4"
+VERSION = "4.2.5"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -1847,7 +1847,7 @@ def _find_powershell_executable() -> str:
 
 
 def _launch_persistent_powershell() -> None:
-    """Launch an elevated persistent PowerShell console for PolicyReset."""
+    """Launch an elevated PowerShell console for PolicyReset."""
     python_exe = _powershell_quote(
         _find_python_console_executable()
     )
@@ -1872,7 +1872,7 @@ def _launch_persistent_powershell() -> None:
             None,
             "runas",
             powershell,
-            f"-NoProfile -NoExit -EncodedCommand {encoded}",
+            f"-NoProfile -EncodedCommand {encoded}",
             working_directory,
             1,
         )
