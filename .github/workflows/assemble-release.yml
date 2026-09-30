@@ -32,7 +32,7 @@ jobs:
           echo "test_count=$test_count"
           echo "gif_count=$gif_count"
 
-          if [ "$code_count" -ne 7 ] || [ "$test_count" -ne 2 ] || [ "$gif_count" -ne 6 ]; then
+          if [ "$code_count" -ne 7 ] || [ "$test_count" -ne 2 ] || [ "$gif_count" -ne 8 ]; then
             echo "complete=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -47,7 +47,7 @@ jobs:
             test -f "payload/test_source.py.part${i}" || complete=false
           done
 
-          for i in $(seq -w 1 6); do
+          for i in $(seq -w 1 8); do
             test -f "payload/demo.gif.b64.part${i}" || complete=false
           done
 
@@ -63,7 +63,7 @@ jobs:
 
           for i in $(seq -w 1 7); do cat "payload/PolicyReset.pyw.part${i}"; done > PolicyReset.pyw
           for i in $(seq -w 1 2); do cat "payload/test_source.py.part${i}"; done > tests/test_source.py
-          for i in $(seq -w 1 6); do cat "payload/demo.gif.b64.part${i}"; done | base64 --decode > assets/demo.gif
+          for i in $(seq -w 1 8); do cat "payload/demo.gif.b64.part${i}"; done | base64 --decode > assets/demo.gif
 
           python -m py_compile PolicyReset.pyw
           python -m unittest discover -s tests -v
