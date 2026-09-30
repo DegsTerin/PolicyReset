@@ -1,0 +1,86 @@
+name: Assemble PolicyReset release assets
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: policyreset-assembly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check payload completeness
+        id: payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          code_count=$(find payload -maxdepth 1 -type f -name 'PolicyReset.pyw.part*' 2>/dev/null | wc -l)
+          test_count=$(find payload -maxdepth 1 -type f -name 'test_source.py.part*' 2>/dev/null | wc -l)
+          gif_count=$(find payload -maxdepth 1 -type f -name 'demo.gif.b64.part*' 2>/dev/null | wc -l)
+
+          echo "code_count=$code_count"
+          echo "test_count=$test_count"
+          echo "gif_count=$gif_count"
+
+          if [ "$code_count" -eq 0 ] || [ "$test_count" -eq 0 ] || [ "$gif_count" -eq 0 ]; then
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          expected_code=$(awk 'BEGIN{c=0} /PolicyReset\.pyw\.part[0-9]+$/{c++} END{print c+0}' < <(find payload -maxdepth 1 -type f -printf '%f\n' | sort))
+          expected_test=$(awk 'BEGIN{c=0} /test_source\.py\.part[0-9]+$/{c++} END{print c+0}' < <(find payload -maxdepth 1 -type f -printf '%f\n' | sort))
+          expected_gif=$(awk 'BEGIN{c=0} /demo\.gif\.b64\.part[0-9]+$/{c++} END{print c+0}' < <(find payload -maxdepth 1 -type f -printf '%f\n' | sort))
+
+          first_missing=0
+          for prefix in PolicyReset.pyw.part test_source.py.part demo.gif.b64.part; do
+            if ! find payload -maxdepth 1 -type f -name "$prefix*" -print | sort | grep -q .; then
+              first_missing=1
+            fi
+          done
+
+          if [ "$first_missing" -ne 0 ]; then
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "complete=true" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble release files
+        if: steps.payload.outputs.complete == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p assets tests
+
+          cat $(find payload -maxdepth 1 -type f -name 'PolicyReset.pyw.part*' | sort) > PolicyReset.pyw
+          cat $(find payload -maxdepth 1 -type f -name 'test_source.py.part*' | sort) > tests/test_source.py
+          cat $(find payload -maxdepth 1 -type f -name 'demo.gif.b64.part*' | sort) | base64 --decode > assets/demo.gif
+
+          python -m py_compile PolicyReset.pyw
+          python -m unittest discover -s tests -v
+
+          rm -rf payload
+
+      - name: Commit assembled release
+        if: steps.payload.outputs.complete == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add PolicyReset.pyw tests/test_source.py assets/demo.gif payload
+          git commit -m "Assemble PolicyReset 4.2.4 release [skip ci]"
+          git push
