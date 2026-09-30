@@ -24,7 +24,7 @@ PolicyReset does **not** attempt to remove, bypass or disable policy controlled 
 
 ![PolicyReset terminal demonstration](assets/demo.gif)
 
-The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.5**. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
+The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
 
 The captured run demonstrated:
 
