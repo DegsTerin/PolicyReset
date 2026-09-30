@@ -1,0 +1,46 @@
+name: PolicyReset compile diagnostics
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Capture compiler diagnostics
+        shell: pwsh
+        run: |
+          $lines = @()
+          $lines += "Python: $(python --version)"
+          $lines += "Platform: $([System.Environment]::OSVersion.VersionString)"
+
+          $output = python -m py_compile .\PolicyReset.pyw 2>&1 | Out-String
+          $code = $LASTEXITCODE
+
+          $lines += "Exit code: $code"
+          $lines += "Compiler output:"
+          $lines += $output
+          $lines | Set-Content -Path ci-compile-debug.txt -Encoding utf8
+
+      - name: Commit diagnostics
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add ci-compile-debug.txt
+          git commit -m "Capture PolicyReset compiler diagnostics [skip ci]"
+          git push
