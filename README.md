@@ -24,7 +24,7 @@ PolicyReset does **not** attempt to remove, bypass or disable policy controlled 
 
 ![PolicyReset terminal demonstration](assets/demo.gif)
 
-The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
+The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.5**. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
 
 The captured run demonstrated:
 
@@ -88,7 +88,7 @@ PolicyReset therefore provides Group Policy refresh as a separate explicit menu 
 [0] EXIT
 ```
 
-Every operation returns to the main menu. The application does not intentionally close the PowerShell console.
+Every operation returns to the main menu. When PolicyReset is launched directly from an existing PowerShell session, `[0] EXIT` closes PolicyReset but leaves the parent PowerShell session open. When `PolicyReset.pyw` is launched through the Windows `.pyw` association, PolicyReset opens a dedicated PowerShell console and `[0] EXIT` closes that console after the application terminates.
 
 ## Core workflow
 
