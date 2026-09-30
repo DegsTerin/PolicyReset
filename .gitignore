@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated PolicyReset data
+*.log
+*.reg
+*.sdb
+*.inf
+*.absent
+gpresult.txt
+gpresult.html
+diagnostic.json
+backup-manifest.json
+local_gpo_reset.json
+
+# Generated runtime directories
+Sessions/
+Logs/
