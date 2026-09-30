@@ -24,51 +24,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          code_count=$(find payload -maxdepth 1 -type f -name 'PolicyReset.pyw.part*' 2>/dev/null | wc -l)
-          test_count=$(find payload -maxdepth 1 -type f -name 'test_source.py.part*' 2>/dev/null | wc -l)
-          gif_count=$(find payload -maxdepth 1 -type f -name 'demo.gif.b64.part*' 2>/dev/null | wc -l)
+          count=$(find payload -maxdepth 1 -type f -name 'release.tar.gz.b64.part*' 2>/dev/null | wc -l)
+          echo "count=$count"
 
-          echo "code_count=$code_count"
-          echo "test_count=$test_count"
-          echo "gif_count=$gif_count"
-
-          if [ "$code_count" -ne 7 ] || [ "$test_count" -ne 2 ] || [ "$gif_count" -ne 8 ]; then
+          if [ "$count" -ne 11 ]; then
             echo "complete=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           complete=true
-
-          for i in $(seq -w 1 7); do
-            test -f "payload/PolicyReset.pyw.part${i}" || complete=false
-          done
-
-          for i in $(seq -w 1 2); do
-            test -f "payload/test_source.py.part${i}" || complete=false
-          done
-
-          for i in $(seq -w 1 8); do
-            test -f "payload/demo.gif.b64.part${i}" || complete=false
+          for i in $(seq -w 1 11); do
+            test -f "payload/release.tar.gz.b64.part${i}" || complete=false
           done
 
           echo "complete=$complete" >> "$GITHUB_OUTPUT"
 
-      - name: Assemble release files
+      - name: Assemble and validate release
         if: steps.payload.outputs.complete == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p assets tests
-
-          for i in $(seq -w 1 7); do cat "payload/PolicyReset.pyw.part${i}"; done > PolicyReset.pyw
-          for i in $(seq -w 1 2); do cat "payload/test_source.py.part${i}"; done > tests/test_source.py
-          for i in $(seq -w 1 8); do cat "payload/demo.gif.b64.part${i}"; done | base64 --decode > assets/demo.gif
+          mkdir -p work
+          for i in $(seq -w 1 11); do cat "payload/release.tar.gz.b64.part${i}"; done > work/release.tar.gz.b64
+          base64 --decode work/release.tar.gz.b64 > work/release.tar.gz
+          tar -xzf work/release.tar.gz -C .
 
           python -m py_compile PolicyReset.pyw
           python -m unittest discover -s tests -v
+          test -s assets/demo.gif
 
-          rm -rf payload
+          rm -rf payload work
 
       - name: Commit assembled release
         if: steps.payload.outputs.complete == 'true'
