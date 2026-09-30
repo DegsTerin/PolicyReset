@@ -34,7 +34,8 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn("ShellExecuteW", self.source)
         self.assertIn('"runas"', self.source)
         self.assertIn("--console", self.source)
-        self.assertIn("-NoProfile -NoExit", self.source)
+        self.assertIn("-NoProfile -EncodedCommand", self.source)
+        self.assertNotIn("-NoProfile -NoExit", self.source)
 
     def test_no_manual_admin_instructions(self):
         self.assertNotIn("Open PowerShell with 'Run as administrator'", self.source)
