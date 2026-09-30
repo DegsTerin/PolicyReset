@@ -36,12 +36,8 @@ jobs:
           source = Path("assets/demo-source.txt").read_text(encoding="utf-8")
           raw_frames = [frame.strip("\n") for frame in source.split("FRAME") if frame.strip()]
 
-          candidates = [
-              "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-              "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
-          ]
-          font_path = next((item for item in candidates if Path(item).exists()), None)
-          if not font_path:
+          font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+          if not Path(font_path).exists():
               raise SystemExit("A monospace font could not be found.")
 
           font = ImageFont.truetype(font_path, 18)
@@ -92,7 +88,7 @@ jobs:
           print(f"Generated {output} with {len(frames)} frames.")
           PY
 
-      - name: Validate application syntax and demonstration
+      - name: Validate application and demonstration
         shell: bash
         run: |
           set -euo pipefail
@@ -106,55 +102,7 @@ jobs:
           rm -rf payload
           rm -f assets/demo-source.txt
 
-      - name: Install permanent CI workflow
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .github/workflows
-          cat > .github/workflows/ci.yml <<'EOF'
-name: PolicyReset CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
-
-jobs:
-  test:
-    runs-on: windows-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Validate Python syntax
-        shell: pwsh
-        run: python -m py_compile PolicyReset.pyw
-
-      - name: Run test suite
-        shell: pwsh
-        run: python -m unittest discover -s tests -v
-
-      - name: Validate project assets
-        shell: pwsh
-        run: |
-          if (-not (Test-Path -Path README.md)) {
-              throw "README.md is missing."
-          }
-          if (-not (Test-Path -Path assets/demo.gif)) {
-              throw "assets/demo.gif is missing."
-          }
-EOF
-
-      - name: Commit final repository
+      - name: Commit demonstration
         shell: bash
         run: |
           set -euo pipefail
@@ -163,6 +111,5 @@ EOF
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
-          git rm -f .github/workflows/assemble-release.yml
-          git commit -m "Add PolicyReset demonstration and CI [skip ci]" || exit 0
+          git commit -m "Add PolicyReset demonstration GIF [skip ci]" || exit 0
           git push
