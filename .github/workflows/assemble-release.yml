@@ -32,28 +32,26 @@ jobs:
           echo "test_count=$test_count"
           echo "gif_count=$gif_count"
 
-          if [ "$code_count" -eq 0 ] || [ "$test_count" -eq 0 ] || [ "$gif_count" -eq 0 ]; then
+          if [ "$code_count" -ne 7 ] || [ "$test_count" -ne 2 ] || [ "$gif_count" -ne 6 ]; then
             echo "complete=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          expected_code=$(awk 'BEGIN{c=0} /PolicyReset\.pyw\.part[0-9]+$/{c++} END{print c+0}' < <(find payload -maxdepth 1 -type f -printf '%f\n' | sort))
-          expected_test=$(awk 'BEGIN{c=0} /test_source\.py\.part[0-9]+$/{c++} END{print c+0}' < <(find payload -maxdepth 1 -type f -printf '%f\n' | sort))
-          expected_gif=$(awk 'BEGIN{c=0} /demo\.gif\.b64\.part[0-9]+$/{c++} END{print c+0}' < <(find payload -maxdepth 1 -type f -printf '%f\n' | sort))
+          complete=true
 
-          first_missing=0
-          for prefix in PolicyReset.pyw.part test_source.py.part demo.gif.b64.part; do
-            if ! find payload -maxdepth 1 -type f -name "$prefix*" -print | sort | grep -q .; then
-              first_missing=1
-            fi
+          for i in $(seq -w 1 7); do
+            test -f "payload/PolicyReset.pyw.part${i}" || complete=false
           done
 
-          if [ "$first_missing" -ne 0 ]; then
-            echo "complete=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          for i in $(seq -w 1 2); do
+            test -f "payload/test_source.py.part${i}" || complete=false
+          done
 
-          echo "complete=true" >> "$GITHUB_OUTPUT"
+          for i in $(seq -w 1 6); do
+            test -f "payload/demo.gif.b64.part${i}" || complete=false
+          done
+
+          echo "complete=$complete" >> "$GITHUB_OUTPUT"
 
       - name: Assemble release files
         if: steps.payload.outputs.complete == 'true'
@@ -63,9 +61,9 @@ jobs:
 
           mkdir -p assets tests
 
-          cat $(find payload -maxdepth 1 -type f -name 'PolicyReset.pyw.part*' | sort) > PolicyReset.pyw
-          cat $(find payload -maxdepth 1 -type f -name 'test_source.py.part*' | sort) > tests/test_source.py
-          cat $(find payload -maxdepth 1 -type f -name 'demo.gif.b64.part*' | sort) | base64 --decode > assets/demo.gif
+          for i in $(seq -w 1 7); do cat "payload/PolicyReset.pyw.part${i}"; done > PolicyReset.pyw
+          for i in $(seq -w 1 2); do cat "payload/test_source.py.part${i}"; done > tests/test_source.py
+          for i in $(seq -w 1 6); do cat "payload/demo.gif.b64.part${i}"; done | base64 --decode > assets/demo.gif
 
           python -m py_compile PolicyReset.pyw
           python -m unittest discover -s tests -v
@@ -81,6 +79,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add PolicyReset.pyw tests/test_source.py assets/demo.gif payload
+          git add PolicyReset.pyw tests/test_source.py assets/demo.gif
           git commit -m "Assemble PolicyReset 4.2.4 release [skip ci]"
           git push
