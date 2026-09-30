@@ -1,70 +1,161 @@
-name: Assemble PolicyReset release assets
+name: Prepare PolicyReset demonstration
 
 on:
   push:
     branches: [main]
 
-concurrency:
-  group: policyreset-assembly
-  cancel-in-progress: true
-
 permissions:
   contents: write
 
 jobs:
-  assemble:
+  prepare:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Check payload completeness
-        id: payload
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install GIF tooling
+        shell: bash
+        run: python -m pip install --disable-pip-version-check --quiet pillow
+
+      - name: Generate terminal demonstration GIF
         shell: bash
         run: |
           set -euo pipefail
 
-          count=$(find payload -maxdepth 1 -type f -name 'release.tar.gz.b64.part*' 2>/dev/null | wc -l)
-          echo "count=$count"
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFont
 
-          if [ "$count" -ne 11 ]; then
-            echo "complete=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          source = Path("assets/demo-source.txt").read_text(encoding="utf-8")
+          raw_frames = [frame.strip("\n") for frame in source.split("FRAME") if frame.strip()]
 
-          complete=true
-          for i in $(seq -w 1 11); do
-            test -f "payload/release.tar.gz.b64.part${i}" || complete=false
-          done
+          font_candidates = [
+              "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+              "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+          ]
 
-          echo "complete=$complete" >> "$GITHUB_OUTPUT"
+          font_path = next((path for path in font_candidates if Path(path).exists()), None)
+          if font_path is None:
+              raise SystemExit("A monospace font could not be found on the runner.")
 
-      - name: Assemble and validate release
-        if: steps.payload.outputs.complete == 'true'
+          font = ImageFont.truetype(font_path, 18)
+          width, height = 1200, 680
+          margin_x, margin_y = 28, 28
+          line_height = 23
+
+          def fit_lines(text: str, max_chars: int = 104) -> list[str]:
+              output = []
+              for line in text.splitlines():
+                  while len(line) > max_chars:
+                      output.append(line[:max_chars])
+                      line = line[max_chars:]
+                  output.append(line)
+              return output
+
+          frames = []
+          for index, text in enumerate(raw_frames):
+              image = Image.new("RGB", (width, height), "#0b0f14")
+              draw = ImageDraw.Draw(image)
+
+              draw.rectangle((12, 12, width - 12, height - 12), outline="#354052", width=2)
+              draw.text(
+                  (margin_x, margin_y),
+                  f"PolicyReset 4.2.4  |  Demonstration {index + 1}/{len(raw_frames)}",
+                  font=font,
+                  fill="#7ee787",
+              )
+
+              y = margin_y + 35
+              for line in fit_lines(text):
+                  if y > height - margin_y:
+                      break
+                  draw.text((margin_x, y), line, font=font, fill="#e6edf3")
+                  y += line_height
+
+              frames.append(image)
+
+          if not frames:
+              raise SystemExit("No demonstration frames were found.")
+
+          output = Path("assets/demo.gif")
+          frames[0].save(
+              output,
+              save_all=True,
+              append_images=frames[1:],
+              duration=2200,
+              loop=0,
+              disposal=2,
+          )
+          print(f"Generated {output} with {len(frames)} frames.")
+          PY
+
+      - name: Validate source and tests
         shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p work
-          for i in $(seq -w 1 11); do cat "payload/release.tar.gz.b64.part${i}"; done > work/release.tar.gz.b64
-          base64 --decode work/release.tar.gz.b64 > work/release.tar.gz
-          tar -xzf work/release.tar.gz -C .
-
           python -m py_compile PolicyReset.pyw
           python -m unittest discover -s tests -v
           test -s assets/demo.gif
 
-          rm -rf payload work
-
-      - name: Commit assembled release
-        if: steps.payload.outputs.complete == 'true'
+      - name: Finalise repository as normal CI
         shell: bash
         run: |
           set -euo pipefail
 
+          cat > .github/workflows/ci.yml <<'EOF'
+          name: PolicyReset CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate Python syntax
+        shell: bash
+        run: python -m py_compile PolicyReset.pyw
+
+      - name: Run test suite
+        shell: bash
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate project assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s assets/demo.gif
+          test -s README.md
+
+          EOF
+
+          rm -f .github/workflows/assemble-release.yml
+          rm -f assets/demo-source.txt
+          rm -rf payload
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add PolicyReset.pyw tests/test_source.py assets/demo.gif
-          git commit -m "Assemble PolicyReset 4.2.4 release [skip ci]"
+          git add -A
+          git commit -m "Add PolicyReset demonstration and CI [skip ci]"
           git push
