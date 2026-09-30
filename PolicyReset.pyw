@@ -1998,3 +1998,83 @@ def main() -> int:
                     "This is a separate operation. It reapplies available "
                     "User and Computer Group Policy with gpupdate /force."
                 )
+                print(
+                    "It is not part of Local Group Policy removal."
+                )
+                print()
+                if confirm_yes_no("Continue with Group Policy refresh?"):
+                    gpupdate_ok = refresh_group_policy(
+                        operation_session,
+                        logger,
+                    )
+                    report = write_refresh_report(
+                        operation_session,
+                        gpupdate_ok,
+                    )
+                    print(
+                        "\nGroup Policy refresh: "
+                        f"{'Successful' if gpupdate_ok else 'Failed'}"
+                    )
+                    print(f"Report: {report}")
+                else:
+                    logger.info("Group Policy refresh cancelled.")
+                input("\nPress Enter to return to the main menu...")
+
+            elif choice == "0":
+                logger.info(
+                    "Application closed by the user."
+                )
+                print()
+                return 0
+
+            else:
+                print(
+                    "\nInvalid option."
+                )
+
+        except KeyboardInterrupt:
+            print(
+                "\n\nOperation cancelled. "
+                "Returning to the main menu."
+            )
+            logger.warn(
+                "Operation interrupted by the user."
+            )
+
+        except subprocess.TimeoutExpired:
+            print(
+                "\nWindows command timed out. "
+                "Returning to the main menu."
+            )
+            logger.error(
+                "Windows command timed out."
+            )
+
+        except PolicyResetError as exc:
+            print(
+                f"\nPolicyReset error: {exc}"
+            )
+            logger.error(str(exc))
+
+        except (
+            OSError,
+            subprocess.SubprocessError,
+        ) as exc:
+            print(
+                f"\nWindows operation failed: {exc}"
+            )
+            logger.error(
+                f"Windows operation failed: {exc}"
+            )
+
+        except Exception as exc:
+            print(
+                f"\nUnexpected error: {exc}"
+            )
+            logger.error(
+                f"Unexpected error: {exc}"
+            )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
