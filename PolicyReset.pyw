@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.3
+PolicyReset 4.3.4
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.3"
+VERSION = "4.3.4"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -57,6 +57,12 @@ LOCAL_GPO_DIRECTORIES = (
     Path(os.environ.get("WINDIR", r"C:\Windows"))
     / "System32"
     / "GroupPolicyUsers",
+)
+
+BACKUP_ARTIFACT_NAMES = (
+    "LocalGroupPolicy",
+    "Registry",
+    "backup-manifest.json",
 )
 
 POLICY_REGISTRY_ROOTS = (
@@ -2608,6 +2614,164 @@ def write_refresh_report(
     return write_json_report(session, "gpupdate.json", data)
 
 
+def find_backup_sessions() -> list[Path]:
+    """Return PolicyReset sessions that contain backup artefacts."""
+    if not SESSION_ROOT.exists():
+        return []
+
+    sessions: list[Path] = []
+
+    for path in SESSION_ROOT.iterdir():
+        if not path.is_dir():
+            continue
+
+        if any(
+            (path / artefact).exists()
+            for artefact in BACKUP_ARTIFACT_NAMES
+        ):
+            sessions.append(path)
+
+    return sorted(
+        sessions,
+        key=lambda path: path.name,
+        reverse=True,
+    )
+
+
+def delete_all_backups(
+    logger: Logger,
+) -> None:
+    """Delete all PolicyReset backup artefacts while preserving reports and logs."""
+    sessions = find_backup_sessions()
+
+    print()
+    print("=" * 78)
+    print("DELETE ALL POLICYRESET BACKUPS")
+    print("=" * 78)
+    print()
+
+    if not sessions:
+        print("No PolicyReset backup sessions were found.")
+        input("\nPress Enter to return to the main menu...")
+        return
+
+    print(
+        f"Backup sessions found: {len(sessions)}"
+    )
+    print(
+        "This operation deletes only the PolicyReset backup artefacts:"
+    )
+    print(
+        "  - LocalGroupPolicy"
+    )
+    print(
+        "  - Registry"
+    )
+    print(
+        "  - backup-manifest.json"
+    )
+    print(
+        "Diagnostic reports, operation reports and log files are preserved."
+    )
+    print()
+
+    if not confirm_yes_no(
+        "Delete all PolicyReset backup artefacts?"
+    ):
+        logger.info(
+            "Deletion of all PolicyReset backups cancelled."
+        )
+        print(
+            "\nOperation cancelled."
+        )
+        input(
+            "\nPress Enter to return to the main menu..."
+        )
+        return
+
+    removed_sessions = 0
+    removed_artefacts = 0
+    failures: list[str] = []
+
+    for session in sessions:
+        session_failed = False
+
+        for artefact_name in BACKUP_ARTIFACT_NAMES:
+            target = session / artefact_name
+
+            if not target.exists():
+                continue
+
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+
+                removed_artefacts += 1
+                logger.info(
+                    f"Deleted backup artefact: {target}"
+                )
+            except OSError as exc:
+                session_failed = True
+                failures.append(
+                    f"{target}: {exc}"
+                )
+                logger.error(
+                    f"Could not delete backup artefact {target}: {exc}"
+                )
+
+        if not session_failed:
+            try:
+                if session.exists() and not any(session.iterdir()):
+                    session.rmdir()
+                    removed_sessions += 1
+                    logger.info(
+                        f"Removed empty backup session directory: {session}"
+                    )
+            except OSError as exc:
+                failures.append(
+                    f"{session}: {exc}"
+                )
+                logger.error(
+                    f"Could not remove empty backup session directory {session}: {exc}"
+                )
+
+    print()
+    print("=" * 78)
+    if failures:
+        print("BACKUP DELETION COMPLETED WITH ERRORS")
+    else:
+        print("ALL POLICYRESET BACKUPS DELETED")
+    print("=" * 78)
+    print()
+    print(f"Backup artefacts deleted: {removed_artefacts}")
+    print(f"Empty backup session directories removed: {removed_sessions}")
+    print(f"Deletion failures: {len(failures)}")
+
+    if failures:
+        print()
+        print("Failures")
+        for failure in failures:
+            print(f"  [FAIL] {failure}")
+
+    print()
+    if failures:
+        print(
+            "Some backup artefacts could not be deleted. "
+            "The remaining reports and logs were preserved."
+        )
+    else:
+        print(
+            "All PolicyReset backup artefacts were removed. "
+            "Diagnostic reports, operation reports and logs were preserved."
+        )
+
+    input(
+        "\nPress Enter to return to the main menu..."
+    )
+
+
 def restore_backup(
     logger: Logger,
 ) -> None:
@@ -3095,6 +3259,9 @@ def main() -> int:
                 "[5] REFRESH GROUP POLICY: Run gpupdate /force separately"
             )
             print(
+                "[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports"
+            )
+            print(
                 "[0] EXIT"
             )
 
@@ -3156,6 +3323,11 @@ def main() -> int:
                 else:
                     logger.info("Group Policy refresh cancelled.")
                 input("\nPress Enter to return to the main menu...")
+
+            elif choice == "6":
+                delete_all_backups(
+                    logger,
+                )
 
             elif choice == "0":
                 logger.info(
