@@ -20,7 +20,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.2.5"', self.source)
+        self.assertIn('VERSION = "4.3.0"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -78,7 +78,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn("LOCAL GROUP POLICY ALREADY CLEAR", self.source)
         self.assertIn("Status: ", self.source)
         self.assertIn("Removal failed: ", self.source)
-        self.assertIn('if before_count == 0 and not still_failed and not remaining_stores:', self.source)
+        self.assertIn('if before_count == 0 and registry_before_count == 0 and operation_clear:', self.source)
 
     def test_gpupdate_output_is_saved_not_echoed_to_ui(self):
         self.assertIn('output_file = session.directory / "gpupdate.txt"', self.source)
@@ -90,6 +90,47 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('registry_before = scan_policy_registry(logger)', self.source)
         self.assertIn('registry_after = scan_policy_registry(logger)', self.source)
 
+
+    def test_registry_policy_roots_are_destructive_reset_targets(self):
+        self.assertIn("def registry_policy_root_status(", self.source)
+        self.assertIn("def remove_registry_policy_root(", self.source)
+        self.assertIn("def force_remove_registry_policy_root(", self.source)
+        self.assertIn('"registry_policy_roots_before": registry_roots_before', self.source)
+        self.assertIn('"registry_policy_roots_after": registry_roots_after', self.source)
+        self.assertIn("Registry policy roots are deleted recursively after backup.", self.source)
+
+    def test_registry_backup_records_absent_roots(self):
+        self.assertIn('f"{base_name}.absent"', self.source)
+        self.assertIn("Registry root was absent at backup time", self.source)
+
+    def test_reset_removes_registry_policy_roots(self):
+        reset = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "remove_all_local_group_policy"
+        )
+        calls = {
+            node.func.id
+            for node in ast.walk(reset)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("remove_registry_policy_root", calls)
+        self.assertIn("scan_policy_registry", calls)
+
+    def test_restore_restores_registry_policy_roots(self):
+        restore = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "restore_backup"
+        )
+        restore_text = ast.get_source_segment(self.source, restore) or ""
+        self.assertIn('"import"', restore_text)
+        self.assertIn("registry_backup_states", restore_text)
+        self.assertIn("Registry policy roots: ", restore_text)
+
     def test_operation_sessions_are_distinct(self):
         self.assertIn('operation_session = create_session()', self.source)
         self.assertIn('diagnose(\n                    operation_session,', self.source)
@@ -97,7 +138,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.2.5"', metadata)
+        self.assertIn('version = "4.3.0"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
@@ -170,7 +211,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         )
         reset_text = ast.get_source_segment(self.source, reset) or ""
         self.assertNotIn("Refreshing User and Computer Group Policy", reset_text)
-        self.assertIn("Verifying Local Group Policy stores", reset_text)
+        self.assertIn("Verifying Local Group Policy and Registry policy roots", reset_text)
 
     def test_success_result_does_not_depend_on_gpupdate(self):
         self.assertIn('not remaining_stores', self.source)
@@ -245,7 +286,8 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('before["remaining_count"] > 0', self.source)
 
     def test_reset_report_has_operation_status(self):
-        self.assertIn('"operation_succeeded": not still_failed', self.source)
+        self.assertIn('"operation_succeeded": (', self.source)
+        self.assertIn('and not registry_roots_after', self.source)
 
     def test_refresh_report_records_output_file(self):
         self.assertIn('"output_file": str(session.directory / "gpupdate.txt")', self.source)
