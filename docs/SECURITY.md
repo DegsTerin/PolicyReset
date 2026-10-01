@@ -2,7 +2,7 @@
 
 PolicyReset is a privileged Windows administration utility.
 
-The current release is 4.3.3.
+The current release is 4.3.4.
 
 It operates on fixed Local Group Policy stores and four fixed Registry policy roots:
 
@@ -30,3 +30,7 @@ Generated backups and reports may contain machine-specific information and must 
 ## Protected Registry removal
 
 The forced Registry path runs in the elevated PolicyReset process. It enables SeTakeOwnershipPrivilege, SeBackupPrivilege and SeRestorePrivilege, captures owner/group/DACL state, uses SetNamedSecurityInfoW for the fixed registry keys, and grants temporary FullControl only to the local Administrators group and SYSTEM. The saved security descriptors are restored on keys that remain after a failed deletion. It does not grant access to Everyone and it does not accept arbitrary Registry paths.
+
+## Backup deletion
+
+The backup deletion operation is restricted to PolicyReset-created backup artefacts inside `C:\ProgramData\PolicyReset\Sessions\`. It deletes only `LocalGroupPolicy`, `Registry` and `backup-manifest.json` items from backup sessions. It does not delete diagnostic reports, operation reports or application log files. No arbitrary path is accepted.
