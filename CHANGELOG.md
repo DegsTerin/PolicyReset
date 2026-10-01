@@ -1,3 +1,11 @@
+## 4.3.4 - 2026-10-01
+
+### Added
+
+- Added a dedicated main-menu option to delete all PolicyReset backup artefacts.
+- Backup cleanup removes only LocalGroupPolicy, Registry and backup-manifest.json from PolicyReset sessions.
+- Diagnostic reports, operation reports and logs are preserved.
+
 ## 4.3.3 - 2026-10-01
 
 ### Fixed
