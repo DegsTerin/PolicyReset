@@ -135,7 +135,7 @@ The reset operation deletes these four Registry policy roots recursively after b
 
 ### 3. Manage Group Policy backups
 
-Option [3] lists available backup sessions and provides actions for the selected backup:
+Option [3] lists available backup sessions. Entering a backup number restores it immediately. Individual deletion uses D followed by the backup number, and A deletes all backups.
 
 ```text
 [1] 20261001_090326_582817
@@ -144,12 +144,12 @@ Option [3] lists available backup sessions and provides actions for the selected
 [0] RETURN TO MAIN MENU
 ```
 
-After selecting a backup:
+Backup actions:
 
 ```text
-[1] RESTORE BACKUP
-[2] DELETE BACKUP
-[0] RETURN TO BACKUP LIST
+1       -> restore backup 1
+D1      -> delete backup 1
+A       -> delete all backups
 ```
 
 The list is refreshed after each action so deleted backups disappear immediately.
