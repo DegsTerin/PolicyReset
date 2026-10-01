@@ -1,3 +1,14 @@
+## 4.3.3 - 2026-10-01
+
+### Fixed
+
+- Replaced the PowerShell/.NET Registry permission-repair path with native Windows security APIs in the elevated PolicyReset process.
+- Protected Registry trees are repaired key-by-key using SeTakeOwnershipPrivilege, SeBackupPrivilege and SeRestorePrivilege before recursive deletion.
+- Temporary access is restricted to the local Administrators group and SYSTEM; no Everyone access is granted.
+- Failed deletion restores the captured owner, group and DACL state on Registry keys that remain.
+- Empty Registry policy containers recreated by Windows are no longer counted as remaining policy data.
+- Added a Windows integration test that exercises protected, read-only Registry permissions before native repair and deletion.
+
 ## 4.3.2 - 2026-10-01
 
 ### Fixed
