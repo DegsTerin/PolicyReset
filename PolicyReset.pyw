@@ -1153,25 +1153,6 @@ def enumerate_registry_key_paths(
     return result
 
 
-def _enumerate_registry_children(
-    display_hive: str,
-    key_path: str,
-) -> list[str]:
-    """Enumerate children after the current key has received temporary access."""
-    hive = _registry_hive(display_hive)
-
-    with winreg.OpenKey(
-        hive,
-        key_path,
-        0,
-        winreg.KEY_READ | winreg.KEY_ENUMERATE_SUB_KEYS,
-    ) as key:
-        return [
-            winreg.EnumKey(key, index)
-            for index in range(winreg.QueryInfoKey(key)[0])
-        ]
-
-
 def _repair_registry_tree_permissions(
     display_hive: str,
     root_path: str,
@@ -1202,10 +1183,16 @@ def _repair_registry_tree_permissions(
             )
 
         try:
-            child_names = _enumerate_registry_children(
-                display_hive,
+            with winreg.OpenKey(
+                _registry_hive(display_hive),
                 key_path,
-            )
+                0,
+                winreg.KEY_READ | winreg.KEY_ENUMERATE_SUB_KEYS,
+            ) as key:
+                child_names = [
+                    winreg.EnumKey(key, index)
+                    for index in range(winreg.QueryInfoKey(key)[0])
+                ]
         except (OSError, PolicyResetError) as exc:
             return False, backups, (
                 f"Could not enumerate Registry children for "
