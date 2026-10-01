@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.7
+PolicyReset 4.3.8
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.7"
+VERSION = "4.3.8"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -2815,7 +2815,7 @@ def delete_all_backups(
 def manage_backups(
     logger: Logger,
 ) -> None:
-    """List backup sessions and restore or delete them directly."""
+    """List backup sessions and provide direct restore or deletion actions."""
     while True:
         sessions = find_backup_sessions()
 
@@ -2837,9 +2837,7 @@ def manage_backups(
             print(f"[{index}] {path.name}")
 
         print()
-        print("To restore a backup, enter its number.")
-        print("To delete a backup, enter D followed by its number.")
-        print("To delete all backups, enter A.")
+        print("[D] DELETE A BACKUP")
         print("[A] DELETE ALL BACKUPS")
         print("[0] RETURN TO MAIN MENU")
         print()
@@ -2853,20 +2851,9 @@ def manage_backups(
             delete_all_backups(logger)
             continue
 
-        if (
-            len(choice) > 1
-            and choice[0].lower() == "d"
-        ):
-            try:
-                selected_index = int(choice[1:]) - 1
-                selected = sessions[selected_index]
-            except (ValueError, IndexError):
-                print("\nInvalid backup selection.")
-                input("\nPress Enter to continue...")
-                continue
-
-            delete_selected_backup(
-                selected,
+        if choice.lower() == "d":
+            delete_backup_from_list(
+                sessions,
                 logger,
             )
             continue
@@ -2882,6 +2869,43 @@ def manage_backups(
             logger,
             selected=selected,
         )
+
+
+def delete_backup_from_list(
+    sessions: list[Path],
+    logger: Logger,
+) -> None:
+    """Select and delete one backup from the current backup list."""
+    print()
+    print("=" * 78)
+    print("DELETE POLICYRESET BACKUP")
+    print("=" * 78)
+    print()
+
+    for index, path in enumerate(sessions, start=1):
+        print(f"[{index}] {path.name}")
+
+    print()
+    print("Press Enter to cancel.")
+    raw = input("Select backup to delete: ").strip()
+
+    if not raw:
+        logger.info("Backup deletion selection cancelled.")
+        return
+
+    try:
+        selected = sessions[int(raw) - 1]
+    except (ValueError, IndexError):
+        print("\nInvalid backup selection.")
+        input("\nPress Enter to continue...")
+        return
+
+    delete_selected_backup(
+        selected,
+        logger,
+    )
+
+
 def restore_backup(
     logger: Logger,
     *,
