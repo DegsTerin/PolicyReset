@@ -153,7 +153,7 @@ class PolicyResetSourceTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 imported.update(alias.asname or alias.name for alias in node.names)
         known = {
-            "Path", "SystemExit", "any", "asdict", "bool", "dataclass",
+            "Path", "SystemExit", "ValueError", "any", "asdict", "bool", "dataclass",
             "enumerate", "getattr", "input", "int", "len", "print",
             "range", "repr", "set", "sorted", "str", "tuple"
         }
