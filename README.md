@@ -135,13 +135,24 @@ The reset operation deletes these four Registry policy roots recursively after b
 
 ### 3. Manage Group Policy backups
 
-Option [3] opens a backup-management submenu:
+Option [3] lists available backup sessions and provides actions for the selected backup:
 
 ```text
-[1] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup
-[2] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports
+[1] 20261001_090326_582817
+[2] 20260930_221500_123456
+[A] DELETE ALL BACKUPS
 [0] RETURN TO MAIN MENU
 ```
+
+After selecting a backup:
+
+```text
+[1] RESTORE BACKUP
+[2] DELETE BACKUP
+[0] RETURN TO BACKUP LIST
+```
+
+The list is refreshed after each action so deleted backups disappear immediately.
 
 Restore replaces the current Local Group Policy stores with the state recorded in the selected backup.
 
