@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.6
+PolicyReset 4.3.7
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.6"
+VERSION = "4.3.7"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -2815,7 +2815,7 @@ def delete_all_backups(
 def manage_backups(
     logger: Logger,
 ) -> None:
-    """List backup sessions and provide restore or deletion actions."""
+    """List backup sessions and restore or delete them directly."""
     while True:
         sessions = find_backup_sessions()
 
@@ -2837,6 +2837,9 @@ def manage_backups(
             print(f"[{index}] {path.name}")
 
         print()
+        print("To restore a backup, enter its number.")
+        print("To delete a backup, enter D followed by its number.")
+        print("To delete all backups, enter A.")
         print("[A] DELETE ALL BACKUPS")
         print("[0] RETURN TO MAIN MENU")
         print()
@@ -2850,6 +2853,24 @@ def manage_backups(
             delete_all_backups(logger)
             continue
 
+        if (
+            len(choice) > 1
+            and choice[0].lower() == "d"
+        ):
+            try:
+                selected_index = int(choice[1:]) - 1
+                selected = sessions[selected_index]
+            except (ValueError, IndexError):
+                print("\nInvalid backup selection.")
+                input("\nPress Enter to continue...")
+                continue
+
+            delete_selected_backup(
+                selected,
+                logger,
+            )
+            continue
+
         try:
             selected = sessions[int(choice) - 1]
         except (ValueError, IndexError):
@@ -2857,42 +2878,10 @@ def manage_backups(
             input("\nPress Enter to continue...")
             continue
 
-        while True:
-            print()
-            print("=" * 78)
-            print("SELECTED GROUP POLICY BACKUP")
-            print("=" * 78)
-            print()
-            print(f"Backup: {selected.name}")
-            print()
-            print("[1] RESTORE BACKUP")
-            print("[2] DELETE BACKUP")
-            print("[0] RETURN TO BACKUP LIST")
-            print()
-
-            action = input("Select an action: ").strip()
-
-            if action == "0":
-                break
-
-            if action == "1":
-                restore_backup(
-                    logger,
-                    selected=selected,
-                )
-                break
-
-            if action == "2":
-                delete_selected_backup(
-                    selected,
-                    logger,
-                )
-                break
-
-            print("\nInvalid selection.")
-            input("\nPress Enter to continue...")
-
-
+        restore_backup(
+            logger,
+            selected=selected,
+        )
 def restore_backup(
     logger: Logger,
     *,
