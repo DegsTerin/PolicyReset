@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.5
+PolicyReset 4.3.6
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.5"
+VERSION = "4.3.6"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -2638,6 +2638,108 @@ def find_backup_sessions() -> list[Path]:
     )
 
 
+def delete_backup_session(
+    session: Path,
+    logger: Logger,
+) -> tuple[int, list[str]]:
+    """Delete backup artefacts from one session and preserve reports and logs."""
+    removed_artefacts = 0
+    failures: list[str] = []
+
+    for artefact_name in BACKUP_ARTIFACT_NAMES:
+        target = session / artefact_name
+
+        if not target.exists():
+            continue
+
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+
+            removed_artefacts += 1
+            logger.info(
+                f"Deleted backup artefact: {target}"
+            )
+        except OSError as exc:
+            failures.append(f"{target}: {exc}")
+            logger.error(
+                f"Could not delete backup artefact {target}: {exc}"
+            )
+
+    if not failures:
+        try:
+            if session.exists() and not any(session.iterdir()):
+                session.rmdir()
+                logger.info(
+                    f"Removed empty backup session directory: {session}"
+                )
+        except OSError as exc:
+            failures.append(f"{session}: {exc}")
+            logger.error(
+                f"Could not remove empty backup session directory {session}: {exc}"
+            )
+
+    return removed_artefacts, failures
+
+
+def delete_selected_backup(
+    session: Path,
+    logger: Logger,
+) -> None:
+    """Delete backup artefacts from the selected PolicyReset session."""
+    print()
+    print("=" * 78)
+    print("DELETE POLICYRESET BACKUP")
+    print("=" * 78)
+    print()
+    print(f"Selected backup: {session.name}")
+    print()
+    print("Only these backup artefacts will be deleted:")
+    print("  - LocalGroupPolicy")
+    print("  - Registry")
+    print("  - backup-manifest.json")
+    print("Diagnostic reports, operation reports and log files are preserved.")
+    print()
+
+    if not confirm_yes_no("Delete the selected PolicyReset backup?"):
+        logger.info(
+            f"Deletion of backup cancelled: {session}"
+        )
+        print("\nOperation cancelled.")
+        return
+
+    removed, failures = delete_backup_session(
+        session,
+        logger,
+    )
+
+    print()
+    print("=" * 78)
+    if failures:
+        print("BACKUP DELETION COMPLETED WITH ERRORS")
+    else:
+        print("BACKUP DELETED")
+    print("=" * 78)
+    print()
+    print(f"Backup artefacts deleted: {removed}")
+    print(f"Deletion failures: {len(failures)}")
+
+    if failures:
+        print()
+        print("Failures")
+        for failure in failures:
+            print(f"  [FAIL] {failure}")
+    else:
+        print(
+            "The selected backup artefacts were removed. "
+            "Reports and logs were preserved."
+        )
+
+    input("\nPress Enter to return to backup management...")
+
+
 def delete_all_backups(
     logger: Logger,
 ) -> None:
@@ -2652,90 +2754,37 @@ def delete_all_backups(
 
     if not sessions:
         print("No PolicyReset backup sessions were found.")
-        input("\nPress Enter to return to the main menu...")
+        input("\nPress Enter to return to backup management...")
         return
 
-    print(
-        f"Backup sessions found: {len(sessions)}"
-    )
-    print(
-        "This operation deletes only the PolicyReset backup artefacts:"
-    )
-    print(
-        "  - LocalGroupPolicy"
-    )
-    print(
-        "  - Registry"
-    )
-    print(
-        "  - backup-manifest.json"
-    )
-    print(
-        "Diagnostic reports, operation reports and log files are preserved."
-    )
+    print(f"Backup sessions found: {len(sessions)}")
+    print("This operation deletes only the PolicyReset backup artefacts:")
+    print("  - LocalGroupPolicy")
+    print("  - Registry")
+    print("  - backup-manifest.json")
+    print("Diagnostic reports, operation reports and log files are preserved.")
     print()
 
-    if not confirm_yes_no(
-        "Delete all PolicyReset backup artefacts?"
-    ):
-        logger.info(
-            "Deletion of all PolicyReset backups cancelled."
-        )
-        print(
-            "\nOperation cancelled."
-        )
-        input(
-            "\nPress Enter to return to the main menu..."
-        )
+    if not confirm_yes_no("Delete all PolicyReset backup artefacts?"):
+        logger.info("Deletion of all PolicyReset backups cancelled.")
+        print("\nOperation cancelled.")
         return
 
-    removed_sessions = 0
     removed_artefacts = 0
+    removed_sessions = 0
     failures: list[str] = []
 
     for session in sessions:
-        session_failed = False
+        before_exists = session.exists()
+        removed, session_failures = delete_backup_session(
+            session,
+            logger,
+        )
+        removed_artefacts += removed
+        failures.extend(session_failures)
 
-        for artefact_name in BACKUP_ARTIFACT_NAMES:
-            target = session / artefact_name
-
-            if not target.exists():
-                continue
-
-            try:
-                if target.is_dir():
-                    shutil.rmtree(target)
-                else:
-                    target.unlink()
-
-                removed_artefacts += 1
-                logger.info(
-                    f"Deleted backup artefact: {target}"
-                )
-            except OSError as exc:
-                session_failed = True
-                failures.append(
-                    f"{target}: {exc}"
-                )
-                logger.error(
-                    f"Could not delete backup artefact {target}: {exc}"
-                )
-
-        if not session_failed:
-            try:
-                if session.exists() and not any(session.iterdir()):
-                    session.rmdir()
-                    removed_sessions += 1
-                    logger.info(
-                        f"Removed empty backup session directory: {session}"
-                    )
-            except OSError as exc:
-                failures.append(
-                    f"{session}: {exc}"
-                )
-                logger.error(
-                    f"Could not remove empty backup session directory {session}: {exc}"
-                )
+        if before_exists and not session.exists():
+            removed_sessions += 1
 
     print()
     print("=" * 78)
@@ -2754,97 +2803,139 @@ def delete_all_backups(
         print("Failures")
         for failure in failures:
             print(f"  [FAIL] {failure}")
-
-    print()
-    if failures:
-        print(
-            "Some backup artefacts could not be deleted. "
-            "The remaining reports and logs were preserved."
-        )
     else:
         print(
             "All PolicyReset backup artefacts were removed. "
             "Diagnostic reports, operation reports and logs were preserved."
         )
 
-    input(
-        "\nPress Enter to return to the main menu..."
-    )
+    input("\nPress Enter to return to backup management...")
 
 
 def manage_backups(
     logger: Logger,
 ) -> None:
-    """Manage PolicyReset backup sessions from the main backup menu."""
-    print()
-    print("=" * 78)
-    print("MANAGE GROUP POLICY BACKUPS")
-    print("=" * 78)
-    print()
-    print("[1] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup")
-    print("[2] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports")
-    print("[0] RETURN TO MAIN MENU")
-    print()
+    """List backup sessions and provide restore or deletion actions."""
+    while True:
+        sessions = find_backup_sessions()
 
-    choice = input("Select an option: ").strip()
+        print()
+        print("=" * 78)
+        print("MANAGE GROUP POLICY BACKUPS")
+        print("=" * 78)
+        print()
 
-    if choice == "1":
-        restore_backup(logger)
-    elif choice == "2":
-        delete_all_backups(logger)
-    elif choice == "0":
-        return
-    else:
-        print("\nInvalid option.")
-        input("\nPress Enter to return to the main menu...")
+        if not sessions:
+            print("No PolicyReset backup sessions were found.")
+            input("\nPress Enter to return to the main menu...")
+            return
+
+        print("Available backups")
+        print()
+
+        for index, path in enumerate(sessions, start=1):
+            print(f"[{index}] {path.name}")
+
+        print()
+        print("[A] DELETE ALL BACKUPS")
+        print("[0] RETURN TO MAIN MENU")
+        print()
+
+        choice = input("Select a backup or action: ").strip()
+
+        if choice == "0":
+            return
+
+        if choice.lower() == "a":
+            delete_all_backups(logger)
+            continue
+
+        try:
+            selected = sessions[int(choice) - 1]
+        except (ValueError, IndexError):
+            print("\nInvalid selection.")
+            input("\nPress Enter to continue...")
+            continue
+
+        while True:
+            print()
+            print("=" * 78)
+            print("SELECTED GROUP POLICY BACKUP")
+            print("=" * 78)
+            print()
+            print(f"Backup: {selected.name}")
+            print()
+            print("[1] RESTORE BACKUP")
+            print("[2] DELETE BACKUP")
+            print("[0] RETURN TO BACKUP LIST")
+            print()
+
+            action = input("Select an action: ").strip()
+
+            if action == "0":
+                break
+
+            if action == "1":
+                restore_backup(
+                    logger,
+                    selected=selected,
+                )
+                break
+
+            if action == "2":
+                delete_selected_backup(
+                    selected,
+                    logger,
+                )
+                break
+
+            print("\nInvalid selection.")
+            input("\nPress Enter to continue...")
 
 
 def restore_backup(
     logger: Logger,
+    *,
+    selected: Path | None = None,
 ) -> None:
-    sessions = (
-        sorted(
-            (
-                path
-                for path in SESSION_ROOT.iterdir()
-                if path.is_dir()
-                and (path / "LocalGroupPolicy").exists()
-            ),
-            key=lambda path: path.name,
-            reverse=True,
-        )
-        if SESSION_ROOT.exists()
-        else []
-    )
+    if selected is None:
+        sessions = find_backup_sessions()
 
-    if not sessions:
-        print("\nNo PolicyReset backup sessions were found.")
-        input("\nPress Enter to return to the main menu...")
-        return
+        if not sessions:
+            print("\nNo PolicyReset backup sessions were found.")
+            input("\nPress Enter to return to the main menu...")
+            return
+
+        print()
+        print("=" * 78)
+        print("RESTORE GROUP POLICY BACKUP")
+        print("=" * 78)
+        print()
+
+        for index, path in enumerate(sessions, start=1):
+            print(f"[{index}] {path.name}")
+
+        print()
+        print("Press Enter to cancel.")
+        raw = input("Select backup: ").strip()
+
+        if not raw:
+            logger.info("Backup restoration cancelled.")
+            return
+
+        try:
+            selected = sessions[int(raw) - 1]
+        except (ValueError, IndexError):
+            print("\nInvalid selection.")
+            input("\nPress Enter to return to the main menu...")
+            return
 
     print()
     print("=" * 78)
     print("RESTORE GROUP POLICY BACKUP")
     print("=" * 78)
     print()
-
-    for index, path in enumerate(sessions, start=1):
-        print(f"[{index}] {path.name}")
-
-    print()
-    print("Press Enter to cancel.")
-    raw = input("Select backup: ").strip()
-
-    if not raw:
-        logger.info("Backup restoration cancelled.")
-        return
-
-    try:
-        selected = sessions[int(raw) - 1]
-    except (ValueError, IndexError):
-        print("\nInvalid selection.")
-        input("\nPress Enter to return to the main menu...")
-        return
+    print(f"Backup selected: {selected.name}")
 
     backup_root = selected / "LocalGroupPolicy"
     registry_backup_root = selected / "Registry"
