@@ -378,7 +378,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         known = {
             "Path", "SystemExit", "ValueError", "any", "asdict", "bool", "dataclass",
             "enumerate", "getattr", "input", "int", "len", "print",
-            "range", "repr", "set", "sorted", "str", "tuple"
+            "range", "repr", "reversed", "set", "sorted", "str", "tuple"
         }
         called = {
             node.func.id
