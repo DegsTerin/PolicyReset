@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.2
+PolicyReset 4.3.3
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.2"
+VERSION = "4.3.3"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -794,7 +794,79 @@ def _enable_process_privileges(
     return success
 
 
-def _registry_provider_path(
+def _registry_security_api() -> dict[str, Any]:
+    """Return configured Advapi32 and Kernel32 functions used for Registry security."""
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+
+    advapi32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+
+    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_wchar_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = (
+        wintypes.BOOL
+    )
+
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = (
+        wintypes.BOOL
+    )
+
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+
+    advapi32.ConvertStringSidToSidW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    return {
+        "advapi32": advapi32,
+        "kernel32": kernel32,
+    }
+
+
+def _registry_native_path(
     display_hive: str,
     root_path: str,
 ) -> str:
@@ -806,286 +878,369 @@ def _registry_provider_path(
     if hive_name is None:
         raise ValueError(f"Unsupported Registry hive: {display_hive}")
 
-    return f"Registry::{hive_name}\\{root_path}"
+    return f"{hive_name}\\{root_path}"
 
 
-def _build_registry_permission_repair_script(
+def _registry_security_sddl(
     display_hive: str,
     root_path: str,
 ) -> str:
-    """Build the constrained PowerShell ACL repair and deletion script."""
-    target = _powershell_quote(
-        _registry_provider_path(display_hive, root_path)
+    """Read owner, group and DACL as an SDDL string."""
+    if not is_windows():
+        raise PolicyResetError("Registry security APIs are only available on Windows.")
+
+    api = _registry_security_api()
+    advapi32 = api["advapi32"]
+    kernel32 = api["kernel32"]
+
+    owner = ctypes.c_void_p()
+    group = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    sacl = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+
+    security_information = (
+        0x00000001  # OWNER_SECURITY_INFORMATION
+        | 0x00000002  # GROUP_SECURITY_INFORMATION
+        | 0x00000004  # DACL_SECURITY_INFORMATION
     )
-    registry_path = _powershell_quote(
-        f"{display_hive}\\{root_path}"
+
+    error = advapi32.GetNamedSecurityInfoW(
+        _registry_native_path(display_hive, root_path),
+        4,  # SE_REGISTRY_KEY
+        security_information,
+        ctypes.byref(owner),
+        ctypes.byref(group),
+        ctypes.byref(dacl),
+        ctypes.byref(sacl),
+        ctypes.byref(security_descriptor),
+    )
+    if error != 0:
+        raise ctypes.WinError(error)
+
+    string_descriptor = ctypes.c_wchar_p()
+    descriptor_length = wintypes.DWORD()
+
+    try:
+        if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            security_descriptor,
+            1,  # SDDL_REVISION_1
+            security_information,
+            ctypes.byref(string_descriptor),
+            ctypes.byref(descriptor_length),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        return string_descriptor.value or ""
+    finally:
+        if string_descriptor:
+            kernel32.LocalFree(ctypes.cast(string_descriptor, ctypes.c_void_p))
+        if security_descriptor:
+            kernel32.LocalFree(security_descriptor)
+
+
+def _registry_dacl_from_sddl(
+    sddl: str,
+) -> tuple[ctypes.c_void_p, ctypes.c_void_p]:
+    """Convert SDDL into a self-relative security descriptor and return its DACL."""
+    api = _registry_security_api()
+    advapi32 = api["advapi32"]
+
+    security_descriptor = ctypes.c_void_p()
+    descriptor_size = wintypes.DWORD()
+
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,  # SDDL_REVISION_1
+        ctypes.byref(security_descriptor),
+        ctypes.byref(descriptor_size),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    dacl = ctypes.c_void_p()
+    dacl_present = wintypes.BOOL()
+    dacl_defaulted = wintypes.BOOL()
+
+    try:
+        if not advapi32.GetSecurityDescriptorDacl(
+            security_descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        if not dacl_present.value or not dacl:
+            raise PolicyResetError("The temporary Registry ACL did not contain a DACL.")
+
+        return security_descriptor, dacl
+    except Exception:
+        api["kernel32"].LocalFree(security_descriptor)
+        raise
+
+
+def _registry_set_owner_and_dacl(
+    display_hive: str,
+    root_path: str,
+) -> None:
+    """Grant only Administrators and SYSTEM temporary full control on one Registry key."""
+    api = _registry_security_api()
+    advapi32 = api["advapi32"]
+    kernel32 = api["kernel32"]
+
+    admin_sid = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(
+        "S-1-5-32-544",
+        ctypes.byref(admin_sid),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    temporary_sd, temporary_dacl = _registry_dacl_from_sddl(
+        "D:(A;;KA;;;BA)(A;;KA;;;SY)"
     )
 
-    return f"""
-$ErrorActionPreference = 'Stop'
-$target = '{target}'
-$registryPath = '{registry_path}'
-$adminSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    security_path = _registry_native_path(display_hive, root_path)
 
-Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-
-public static class PolicyResetNativeMethods
-{{
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Luid
-    {{
-        public uint LowPart;
-        public int HighPart;
-    }}
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LuidAndAttributes
-    {{
-        public Luid Luid;
-        public uint Attributes;
-    }}
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenPrivileges
-    {{
-        public uint PrivilegeCount;
-        public LuidAndAttributes Privileges;
-    }}
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern bool OpenProcessToken(
-        IntPtr ProcessHandle,
-        uint DesiredAccess,
-        out IntPtr TokenHandle);
-
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool LookupPrivilegeValue(
-        string SystemName,
-        string Name,
-        out Luid Luid);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern bool AdjustTokenPrivileges(
-        IntPtr TokenHandle,
-        bool DisableAllPrivileges,
-        ref TokenPrivileges NewState,
-        uint BufferLength,
-        IntPtr PreviousState,
-        IntPtr ReturnLength);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr Handle);
-
-    public static void EnablePrivilege(string name)
-    {{
-        IntPtr token;
-        if (!OpenProcessToken(
-                GetCurrentProcess(),
-                0x0008 | 0x0020,
-                out token))
-        {{
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                "OpenProcessToken failed");
-        }}
-
-        try
-        {{
-            Luid luid;
-            if (!LookupPrivilegeValue(
-                    null,
-                    name,
-                    out luid))
-            {{
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "LookupPrivilegeValue failed");
-            }}
-
-            TokenPrivileges privileges = new TokenPrivileges
-            {{
-                PrivilegeCount = 1,
-                Privileges = new LuidAndAttributes
-                {{
-                    Luid = luid,
-                    Attributes = 0x00000002
-                }}
-            }};
-
-            if (!AdjustTokenPrivileges(
-                    token,
-                    false,
-                    ref privileges,
-                    0,
-                    IntPtr.Zero,
-                    IntPtr.Zero))
-            {{
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "AdjustTokenPrivileges failed");
-            }}
-
-            int error = Marshal.GetLastWin32Error();
-            if (error == 1300)
-            {{
-                throw new Win32Exception(
-                    error,
-                    "AdjustTokenPrivileges did not enable the privilege");
-            }}
-        }}
-        finally
-        {{
-            CloseHandle(token);
-        }}
-    }}
-}}
-'@
-
-$privilegeFailures = New-Object System.Collections.Generic.List[string]
-foreach ($privilege in @(
-    'SeTakeOwnershipPrivilege',
-    'SeBackupPrivilege',
-    'SeRestorePrivilege'
-)) {{
-    try {{
-        [PolicyResetNativeMethods]::EnablePrivilege($privilege)
-    }}
-    catch {{
-        $privilegeFailures.Add(
-            ("{{0}}: {{1}}" -f $privilege, $_.Exception.Message)
+    try:
+        owner_error = advapi32.SetNamedSecurityInfoW(
+            security_path,
+            4,  # SE_REGISTRY_KEY
+            0x00000001,  # OWNER_SECURITY_INFORMATION
+            admin_sid,
+            None,
+            None,
+            None,
         )
-    }}
-}}
+        if owner_error != 0:
+            raise ctypes.WinError(owner_error)
 
-$rule = [System.Security.AccessControl.RegistryAccessRule]::new(
-    $adminSid,
-    [System.Security.AccessControl.RegistryRights]::FullControl,
-    [System.Security.AccessControl.InheritanceFlags]::None,
-    [System.Security.AccessControl.PropagationFlags]::None,
-    [System.Security.AccessControl.AccessControlType]::Allow
-)
+        dacl_error = advapi32.SetNamedSecurityInfoW(
+            security_path,
+            4,  # SE_REGISTRY_KEY
+            0x00000004,  # DACL_SECURITY_INFORMATION
+            None,
+            None,
+            temporary_dacl,
+            None,
+        )
+        if dacl_error != 0:
+            raise ctypes.WinError(dacl_error)
+    finally:
+        kernel32.LocalFree(temporary_sd)
+        kernel32.LocalFree(admin_sid)
 
-$backups = New-Object System.Collections.Generic.List[object]
-$queue = New-Object System.Collections.Generic.Queue[string]
-$queue.Enqueue($target)
 
-try {{
-    while ($queue.Count -gt 0) {{
-        $current = $queue.Dequeue()
-        $acl = Get-Acl -LiteralPath $current
-        $backups.Add(
-            [pscustomobject]@{{
-                Path = $current
-                Sddl = $acl.Sddl
-            }}
+def _registry_restore_security_sddl(
+    display_hive: str,
+    root_path: str,
+    sddl: str,
+) -> None:
+    """Restore owner, group and DACL from a saved SDDL descriptor."""
+    api = _registry_security_api()
+    advapi32 = api["advapi32"]
+    kernel32 = api["kernel32"]
+
+    security_descriptor = ctypes.c_void_p()
+    descriptor_size = wintypes.DWORD()
+
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,  # SDDL_REVISION_1
+        ctypes.byref(security_descriptor),
+        ctypes.byref(descriptor_size),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    owner = ctypes.c_void_p()
+    group = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    sacl = ctypes.c_void_p()
+    owner_defaulted = wintypes.BOOL()
+    group_defaulted = wintypes.BOOL()
+    dacl_present = wintypes.BOOL()
+    dacl_defaulted = wintypes.BOOL()
+
+    try:
+        if not advapi32.GetSecurityDescriptorOwner(
+            security_descriptor,
+            ctypes.byref(owner),
+            ctypes.byref(owner_defaulted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        if not advapi32.GetSecurityDescriptorGroup(
+            security_descriptor,
+            ctypes.byref(group),
+            ctypes.byref(group_defaulted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        if not advapi32.GetSecurityDescriptorDacl(
+            security_descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        security_information = (
+            0x00000001  # OWNER_SECURITY_INFORMATION
+            | 0x00000002  # GROUP_SECURITY_INFORMATION
+            | 0x00000004  # DACL_SECURITY_INFORMATION
         )
 
-        $acl.SetOwner($adminSid)
-        $acl.SetAccessRule($rule)
-        Set-Acl -LiteralPath $current -AclObject $acl
+        error = advapi32.SetNamedSecurityInfoW(
+            _registry_native_path(display_hive, root_path),
+            4,  # SE_REGISTRY_KEY
+            security_information,
+            owner,
+            group,
+            dacl if dacl_present.value else None,
+            None,
+        )
+        if error != 0:
+            raise ctypes.WinError(error)
+    finally:
+        kernel32.LocalFree(security_descriptor)
 
-        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force)) {{
-            $queue.Enqueue($child.PSPath)
-        }}
-    }}
 
-    try {{
-        Remove-Item -LiteralPath $target -Recurse -Force
-    }}
-    catch {{
-        $deleteError = $_.Exception.Message
+def enumerate_registry_key_paths(
+    display_hive: str,
+    root_path: str,
+) -> list[str]:
+    """Enumerate a fixed Registry key tree from parent to child."""
+    hive = _registry_hive(display_hive)
+    result: list[str] = []
 
-        if (Get-Command reg.exe -ErrorAction SilentlyContinue) {{
-            $regOutput = @(
-                & reg.exe delete $registryPath /f 2>&1
+    def walk(current_path: str) -> None:
+        result.append(current_path)
+
+        with winreg.OpenKey(
+            hive,
+            current_path,
+            0,
+            winreg.KEY_READ | winreg.KEY_ENUMERATE_SUB_KEYS,
+        ) as key:
+            child_names = [
+                winreg.EnumKey(key, index)
+                for index in range(winreg.QueryInfoKey(key)[0])
+            ]
+
+        for child_name in child_names:
+            walk(f"{current_path}\\{child_name}")
+
+    walk(root_path)
+    return result
+
+
+def _repair_registry_tree_permissions(
+    display_hive: str,
+    root_path: str,
+    logger: Logger,
+) -> tuple[bool, dict[str, str], str]:
+    """Save original security and grant controlled access throughout one fixed tree."""
+    backups: dict[str, str] = {}
+
+    try:
+        key_paths = enumerate_registry_key_paths(
+            display_hive,
+            root_path,
+        )
+    except (OSError, PolicyResetError) as exc:
+        return False, backups, f"Could not enumerate Registry tree: {exc}"
+
+    for key_path in key_paths:
+        try:
+            backups[key_path] = _registry_security_sddl(
+                display_hive,
+                key_path,
             )
-            $regExitCode = $LASTEXITCODE
+            _registry_set_owner_and_dacl(
+                display_hive,
+                key_path,
+            )
+        except (OSError, PolicyResetError) as exc:
+            return False, backups, (
+                f"Permission repair failed for "
+                f"{display_hive}\\{key_path}: {exc}"
+            )
 
-            if ($regExitCode -eq 0 -and -not (Test-Path -LiteralPath $target)) {{
-                exit 0
-            }}
-
-            $fallback = (
-                $regOutput -join [Environment]::NewLine
-            ).Trim()
-
-            if ($fallback) {{
-                $deleteError = (
-                    "$deleteError; reg.exe fallback: $fallback"
-                )
-            }}
-            else {{
-                $deleteError = (
-                    "$deleteError; reg.exe fallback exit code $regExitCode"
-                )
-            }}
-        }}
-
-        throw $deleteError
-    }}
-}}
-catch {{
-    $failureParts = New-Object System.Collections.Generic.List[string]
-    $failureParts.Add($_.Exception.Message)
-
-    if ($privilegeFailures.Count -gt 0) {{
-        $failureParts.Add(("Privilege enablement warnings: " + ($privilegeFailures -join '; ')))
-    }}
-
-    foreach ($saved in ($backups | Sort-Object {{ $_.Path.Length }} -Descending)) {{
-        try {{
-            if (Test-Path -LiteralPath $saved.Path) {{
-                $security = New-Object System.Security.AccessControl.RegistrySecurity
-                $security.SetSecurityDescriptorSddlForm($saved.Sddl)
-                Set-Acl -LiteralPath $saved.Path -AclObject $security
-            }}
-        }}
-        catch {{
-            $failureParts.Add(("Security descriptor restoration failed for " + $saved.Path + ": " + $_.Exception.Message))
-        }}
-    }}
-
-    [Console]::Error.WriteLine(($failureParts -join [Environment]::NewLine))
-    exit 1
-}}
-
-if (Test-Path -LiteralPath $target) {{
-    [Console]::Error.WriteLine(
-        'The Registry policy root still exists after permission-assisted deletion.'
+    logger.info(
+        f"Controlled Registry permission repair applied to "
+        f"{display_hive}\\{root_path} and {len(key_paths) - 1} child key(s)."
     )
-    exit 2
-}}
+    return True, backups, ""
 
-exit 0
-""".strip()
+
+def _restore_registry_tree_security(
+    backups: dict[str, str],
+    display_hive: str,
+    logger: Logger,
+) -> list[str]:
+    """Restore saved Registry security descriptors for keys that remain."""
+    failures: list[str] = []
+
+    for key_path in sorted(
+        backups,
+        key=len,
+        reverse=True,
+    ):
+        try:
+            with winreg.OpenKey(
+                _registry_hive(display_hive),
+                key_path,
+                0,
+                winreg.KEY_READ,
+            ):
+                pass
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # The key may still exist but be inaccessible; attempt restoration anyway.
+            pass
+
+        try:
+            _registry_restore_security_sddl(
+                display_hive,
+                key_path,
+                backups[key_path],
+            )
+        except (OSError, PolicyResetError) as exc:
+            failures.append(
+                f"{display_hive}\\{key_path}: {exc}"
+            )
+
+    if failures:
+        logger.warn(
+            "Some Registry security descriptors could not be restored: "
+            + "; ".join(failures)
+        )
+
+    return failures
 
 def registry_policy_root_access_state(
     display_hive: str,
     root_path: str,
 ) -> tuple[bool, str]:
-    full_path = f"{display_hive}\\{root_path}"
-
     try:
         with winreg.OpenKey(
             _registry_hive(display_hive),
             root_path,
             0,
-            winreg.KEY_READ,
-        ):
-            return True, "Present"
+            winreg.KEY_READ | winreg.KEY_ENUMERATE_SUB_KEYS,
+        ) as key:
+            subkey_count, value_count, _ = winreg.QueryInfoKey(key)
+
+        if subkey_count == 0 and value_count == 0:
+            return False, "Empty"
+
+        return True, "Present"
     except FileNotFoundError:
         return False, "Absent"
     except PermissionError as exc:
         return False, f"Access denied: {exc}"
     except OSError as exc:
         return False, str(exc)
-
 
 def registry_policy_root_status() -> list[str]:
     present: list[str] = []
@@ -1146,7 +1301,7 @@ def remove_registry_policy_root(
         root_path,
     )
 
-    if not root_exists and state == "Absent":
+    if not root_exists and state in {"Absent", "Empty"}:
         return True, "Already absent"
 
     if not root_exists:
@@ -1195,7 +1350,7 @@ def force_remove_registry_policy_root(
         root_path,
     )
 
-    if not root_exists and state == "Absent":
+    if not root_exists and state in {"Absent", "Empty"}:
         return True, "Already absent"
 
     if not root_exists:
@@ -1214,100 +1369,87 @@ def force_remove_registry_policy_root(
             f"One or more Windows privileges could not be enabled for {full_path}."
         )
 
-    permission_repair_reason = ""
+    repaired, security_backups, repair_reason = (
+        _repair_registry_tree_permissions(
+            display_hive,
+            root_path,
+            logger,
+        )
+    )
+    if not repaired:
+        restore_failures = _restore_registry_tree_security(
+            security_backups,
+            display_hive,
+            logger,
+        )
+        restore_reason = repair_reason
+        if restore_failures:
+            restore_reason += (
+                "; security restoration failures: "
+                + "; ".join(restore_failures)
+            )
+
+        logger.error(
+            f"Forced Registry permission repair failed for {full_path}: "
+            f"{restore_reason}"
+        )
+        return False, restore_reason
 
     try:
-        powershell = _find_powershell_executable()
-        command = _build_registry_permission_repair_script(
-            display_hive,
+        remove_registry_key_tree(
+            _registry_hive(display_hive),
             root_path,
         )
-        import base64
-
-        encoded = base64.b64encode(
-            command.encode("utf-16le")
-        ).decode("ascii")
-
-        code, stdout, stderr = run_command(
-            [
-                powershell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                encoded,
-            ],
-            timeout=180,
-        )
-
-        verified, verification_state = registry_policy_root_access_state(
+    except (PermissionError, OSError) as exc:
+        deletion_reason = str(exc)
+        restore_failures = _restore_registry_tree_security(
+            security_backups,
             display_hive,
-            root_path,
+            logger,
         )
-        if not verified and verification_state == "Absent" and code == 0:
-            logger.info(
-                f"Permission-assisted Registry policy removal succeeded: {full_path}"
+        if restore_failures:
+            deletion_reason += (
+                "; security restoration failures: "
+                + "; ".join(restore_failures)
             )
-            return True, "Removed successfully after controlled permission repair"
 
-        permission_repair_reason = (
-            stderr.strip()
-            or stdout.strip()
-            or f"permission-assisted removal exit code {code}"
+        logger.error(
+            f"Forced Registry policy removal failed for {full_path}: "
+            f"{deletion_reason}"
         )
-        if verification_state != "Absent":
-            permission_repair_reason = (
-                f"{permission_repair_reason}; verification state: {verification_state}"
-            )
-    except (OSError, PolicyResetError) as exc:
-        permission_repair_reason = str(exc)
-
-    logger.warn(
-        f"Permission-assisted Registry policy removal did not clear {full_path}: "
-        f"{permission_repair_reason}"
-    )
-
-    if not command_exists("reg.exe"):
-        return False, permission_repair_reason or "reg.exe was not found."
-
-    code, stdout, stderr = run_command(
-        [
-            "reg.exe",
-            "delete",
-            full_path,
-            "/f",
-        ],
-        timeout=120,
-    )
+        return False, deletion_reason
 
     verified, verification_state = registry_policy_root_access_state(
         display_hive,
         root_path,
     )
-    if not verified and verification_state == "Absent":
+    if not verified and verification_state in {"Absent", "Empty"}:
         logger.info(
-            f"Forced Registry policy removal succeeded with reg.exe fallback: {full_path}"
+            f"Forced Registry policy removal succeeded: {full_path}"
         )
-        return True, "Removed successfully with reg.exe fallback"
+        return True, "Removed successfully after controlled permission repair"
 
-    reg_reason = (
-        stderr.strip()
-        or stdout.strip()
-        or f"reg delete exit code {code}"
+    restore_failures = _restore_registry_tree_security(
+        security_backups,
+        display_hive,
+        logger,
     )
-    if verification_state != "Absent":
-        reg_reason = (
-            f"{reg_reason}; verification state: {verification_state}"
+    reason = (
+        "The Registry policy root still contains policy data after "
+        "permission-assisted deletion."
+    )
+    if verification_state != "Present":
+        reason += f" Verification state: {verification_state}."
+    if restore_failures:
+        reason += (
+            "; security restoration failures: "
+            + "; ".join(restore_failures)
         )
-
-    reason = "; ".join(
-        item for item in (permission_repair_reason, reg_reason) if item
-    ) or "Unknown Registry deletion error"
 
     logger.error(
         f"Forced Registry policy removal failed for {full_path}: {reason}"
     )
     return False, reason
-
 
 def backup_registry(
     session: Session,
@@ -1910,7 +2052,7 @@ def show_removal_result(
             print(f"  [FAIL] {item.path}")
             print(f"         {item.reason}")
 
-    print(f"  Registry roots remaining: {len(registry_roots_after)}")
+    print(f"  Registry policy locations with data remaining: {len(registry_roots_after)}")
 
     print("\nGroup Policy refresh")
     if gpupdate_ok is None:
@@ -1933,10 +2075,10 @@ def show_removal_result(
 
     if registry_roots_after:
         for path in registry_roots_after:
-            print(f"  [FAIL] Registry policy root remains: {path}")
+            print(f"  [FAIL] Registry policy data remains at: {path}")
     else:
         print(
-            "  [OK] All targeted Registry policy roots are absent."
+            "  [OK] All targeted Registry policy locations are clear of policy data."
         )
 
     if applied_objects:
