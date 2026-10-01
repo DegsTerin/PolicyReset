@@ -24,7 +24,7 @@ PolicyReset does **not** attempt to remove, bypass or disable policy controlled 
 
 ![PolicyReset terminal demonstration](assets/demo.gif)
 
-The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It predates the 4.3.0 Registry reset extension. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
+The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It predates the 4.3.0 Registry reset extension and the 4.3.1 protected-Registry cleanup fix. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
 
 The captured run demonstrated:
 
@@ -131,7 +131,7 @@ Stores remaining
 
 When a store cannot be removed normally, the utility can attempt a forced removal of that **specific local Group Policy store**.
 
-The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. It does not delete arbitrary Registry locations outside these fixed targets and does not run `gpupdate /force`.
+The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. For protected Registry keys, forced removal first uses Windows security APIs through PowerShell to temporarily grant only the local Administrators group the required access, then performs the deletion. The original security descriptors are restored on the remaining keys if the permission-assisted deletion fails. It does not grant permissions to Everyone, delete arbitrary Registry locations, or run `gpupdate /force`.
 
 ### 3. Restore a backup
 
@@ -359,7 +359,7 @@ PolicyReset follows a small set of operational principles:
 
 PolicyReset is a Local Group Policy tool. It does not claim to remove policy delivered by domain controllers, Microsoft Entra ID, MDM, Intune or other organisation-controlled systems.
 
-Registry entries under policy-related paths can remain after Local Group Policy stores are removed. Such entries are reported separately and are not automatically deleted by the core reset operation.
+Registry policy values under the four targeted roots are part of the core reset operation. They are counted before and after removal, and the reset is only reported as successful when no targeted Registry root remains. Registry data outside those four fixed roots is not removed.
 
 A restart may be appropriate after a real Local Group Policy removal before performing final application-level verification.
 
