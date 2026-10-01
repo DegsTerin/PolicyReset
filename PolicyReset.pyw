@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.0
+PolicyReset 4.3.2
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.1"
+VERSION = "4.3.2"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -817,11 +817,152 @@ def _build_registry_permission_repair_script(
     target = _powershell_quote(
         _registry_provider_path(display_hive, root_path)
     )
+    registry_path = _powershell_quote(
+        f"{display_hive}\\{root_path}"
+    )
 
     return f"""
 $ErrorActionPreference = 'Stop'
 $target = '{target}'
+$registryPath = '{registry_path}'
 $adminSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class PolicyResetNativeMethods
+{{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid
+    {{
+        public uint LowPart;
+        public int HighPart;
+    }}
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LuidAndAttributes
+    {{
+        public Luid Luid;
+        public uint Attributes;
+    }}
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenPrivileges
+    {{
+        public uint PrivilegeCount;
+        public LuidAndAttributes Privileges;
+    }}
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(
+        IntPtr ProcessHandle,
+        uint DesiredAccess,
+        out IntPtr TokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool LookupPrivilegeValue(
+        string SystemName,
+        string Name,
+        out Luid Luid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AdjustTokenPrivileges(
+        IntPtr TokenHandle,
+        bool DisableAllPrivileges,
+        ref TokenPrivileges NewState,
+        uint BufferLength,
+        IntPtr PreviousState,
+        IntPtr ReturnLength);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr Handle);
+
+    public static void EnablePrivilege(string name)
+    {{
+        IntPtr token;
+        if (!OpenProcessToken(
+                GetCurrentProcess(),
+                0x0008 | 0x0020,
+                out token))
+        {{
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "OpenProcessToken failed");
+        }}
+
+        try
+        {{
+            Luid luid;
+            if (!LookupPrivilegeValue(
+                    null,
+                    name,
+                    out luid))
+            {{
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "LookupPrivilegeValue failed");
+            }}
+
+            TokenPrivileges privileges = new TokenPrivileges
+            {{
+                PrivilegeCount = 1,
+                Privileges = new LuidAndAttributes
+                {{
+                    Luid = luid,
+                    Attributes = 0x00000002
+                }}
+            }};
+
+            if (!AdjustTokenPrivileges(
+                    token,
+                    false,
+                    ref privileges,
+                    0,
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+            {{
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "AdjustTokenPrivileges failed");
+            }}
+
+            int error = Marshal.GetLastWin32Error();
+            if (error != 0)
+            {{
+                throw new Win32Exception(
+                    error,
+                    "AdjustTokenPrivileges did not enable the privilege");
+            }}
+        }}
+        finally
+        {{
+            CloseHandle(token);
+        }}
+    }}
+}}
+'@
+
+$privilegeFailures = New-Object System.Collections.Generic.List[string]
+foreach ($privilege in @(
+    'SeTakeOwnershipPrivilege',
+    'SeBackupPrivilege',
+    'SeRestorePrivilege'
+)) {{
+    try {{
+        [PolicyResetNativeMethods]::EnablePrivilege($privilege)
+    }}
+    catch {{
+        $privilegeFailures.Add(
+            ("{{0}}: {{1}}" -f $privilege, $_.Exception.Message)
+        )
+    }}
+}}
+
 $rule = [System.Security.AccessControl.RegistryAccessRule]::new(
     $adminSid,
     [System.Security.AccessControl.RegistryRights]::FullControl,
@@ -829,6 +970,7 @@ $rule = [System.Security.AccessControl.RegistryAccessRule]::new(
     [System.Security.AccessControl.PropagationFlags]::None,
     [System.Security.AccessControl.AccessControlType]::Allow
 )
+
 $backups = New-Object System.Collections.Generic.List[object]
 $queue = New-Object System.Collections.Generic.Queue[string]
 $queue.Enqueue($target)
@@ -837,7 +979,13 @@ try {{
     while ($queue.Count -gt 0) {{
         $current = $queue.Dequeue()
         $acl = Get-Acl -LiteralPath $current
-        $backups.Add([pscustomobject]@{{Path=$current; Sddl=$acl.Sddl}})
+        $backups.Add(
+            [pscustomobject]@{{
+                Path = $current
+                Sddl = $acl.Sddl
+            }}
+        )
+
         $acl.SetOwner($adminSid)
         $acl.SetAccessRule($rule)
         Set-Acl -LiteralPath $current -AclObject $acl
@@ -847,10 +995,56 @@ try {{
         }}
     }}
 
-    Remove-Item -LiteralPath $target -Recurse -Force
+    try {{
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }}
+    catch {{
+        $deleteError = $_.Exception.Message
+
+        if (Get-Command reg.exe -ErrorAction SilentlyContinue) {{
+            $regOutput = @(
+                & reg.exe delete $registryPath /f 2>&1
+            )
+            $regExitCode = $LASTEXITCODE
+
+            if (
+                $regExitCode -eq 0
+                -and -not (Test-Path -LiteralPath $target)
+            ) {{
+                exit 0
+            }}
+
+            $fallback = (
+                $regOutput -join [Environment]::NewLine
+            ).Trim()
+
+            if ($fallback) {{
+                $deleteError = (
+                    "$deleteError; reg.exe fallback: $fallback"
+                )
+            }}
+            else {{
+                $deleteError = (
+                    "$deleteError; reg.exe fallback exit code $regExitCode"
+                )
+            }}
+        }}
+
+        throw $deleteError
+    }}
 }}
 catch {{
-    $failure = $_.Exception.Message
+    $failureParts = New-Object System.Collections.Generic.List[string]
+    $failureParts.Add($_.Exception.Message)
+
+    if ($privilegeFailures.Count -gt 0) {{
+        $failureParts.Add(
+            (
+                "Privilege enablement warnings: "
+                + ($privilegeFailures -join '; ')
+            )
+        )
+    }}
 
     foreach ($saved in ($backups | Sort-Object {{ $_.Path.Length }} -Descending)) {{
         try {{
@@ -859,23 +1053,34 @@ catch {{
                 $security.SetSecurityDescriptorSddlForm($saved.Sddl)
                 Set-Acl -LiteralPath $saved.Path -AclObject $security
             }}
-        }} catch {{
-            # Best-effort restoration of security descriptors after a failed deletion.
+        }}
+        catch {{
+            $failureParts.Add(
+                (
+                    "Security descriptor restoration failed for "
+                    + $saved.Path
+                    + ": "
+                    + $_.Exception.Message
+                )
+            )
         }}
     }}
 
-    [Console]::Error.WriteLine($failure)
+    [Console]::Error.WriteLine(
+        $failureParts -join [Environment]::NewLine
+    )
     exit 1
 }}
 
 if (Test-Path -LiteralPath $target) {{
-    [Console]::Error.WriteLine('The Registry policy root still exists after permission-assisted deletion.')
+    [Console]::Error.WriteLine(
+        'The Registry policy root still exists after permission-assisted deletion.'
+    )
     exit 2
 }}
 
 exit 0
 """.strip()
-
 
 def registry_policy_root_access_state(
     display_hive: str,
