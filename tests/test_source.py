@@ -113,6 +113,8 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('"SeBackupPrivilege"', self.source)
         self.assertIn('"SeRestorePrivilege"', self.source)
         self.assertIn("def _registry_security_api(", self.source)
+        self.assertIn('"HKCU": "CURRENT_USER"', self.source)
+        self.assertIn('"HKLM": "MACHINE"', self.source)
         self.assertIn("GetNamedSecurityInfoW", self.source)
         self.assertIn("SetNamedSecurityInfoW", self.source)
         self.assertIn("ConvertSecurityDescriptorToStringSecurityDescriptorW", self.source)
