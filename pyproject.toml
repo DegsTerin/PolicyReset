@@ -1,6 +1,6 @@
 [project]
 name = "policyreset"
-version = "4.3.5"
+version = "4.3.6"
 description = "Windows Local Group Policy diagnostic, backup, reset and verification utility"
 readme = "README.md"
 requires-python = ">=3.10"
