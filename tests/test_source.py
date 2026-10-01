@@ -205,7 +205,7 @@ class PolicyResetSourceTests(unittest.TestCase):
             functions["_registry_restore_security_sddl"](
                 "HKCU",
                 root_path,
-                "O:SYG:SYD:(A;;KR;;;BA)(A;;KA;;;SY)",
+                "O:BAG:BAD:(A;;KR;;;BA)(A;;KA;;;SY)",
             )
             functions["_registry_restore_security_sddl"](
                 "HKCU",
