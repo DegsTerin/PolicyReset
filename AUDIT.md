@@ -9,7 +9,8 @@
 - Diagnostic, reset, restore and refresh operations retain separate JSON reports.
 - Active Directory, Microsoft Entra ID, MDM, Intune and other remote organisation-controlled policy are outside scope.
 
-- Protected Registry removal enables the required token privileges inside the PowerShell process that performs the cleanup, not only in the Python parent process.
-- The permission repair is limited to the fixed four Registry policy roots and targets the local Administrators group rather than Everyone.
-- If PowerShell deletion fails after ACL repair, the same process attempts the fixed-target reg.exe fallback before restoring saved security descriptors on a final failure.
+- Protected Registry removal enables the required token privileges in the elevated PolicyReset process and uses native Windows security APIs for the fixed Registry tree.
+- The permission repair is limited to the fixed four Registry policy roots and grants temporary FullControl only to the local Administrators group and SYSTEM.
+- Original owner, group and DACL state is captured before repair and restored on keys that remain after a failed deletion.
+- Empty Registry containers recreated without policy data are not treated as remaining policy data during verification.
 - Registry access-denied states are not treated as an absent root during final verification.
