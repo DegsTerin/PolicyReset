@@ -141,6 +141,24 @@ A safety backup is created before the restore operation. The resulting Local Gro
 
 Registry exports created during backup are imported during restore so the selected backup can restore both layers.
 
+### 4. Delete all backups
+
+The main menu provides a dedicated backup cleanup operation:
+
+```text
+[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports
+```
+
+This removes only these fixed backup artefacts from `C:\ProgramData\PolicyReset\Sessions\`:
+
+```text
+LocalGroupPolicy\
+Registry\
+backup-manifest.json
+```
+
+Diagnostic reports, operation reports and log files are preserved. The operation requires an explicit `Y` confirmation.
+
 ### 4. Refresh Group Policy
 
 The refresh operation is explicit:
