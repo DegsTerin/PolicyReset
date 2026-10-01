@@ -677,26 +677,40 @@ def _registry_hive(
     raise ValueError(f"Unsupported Registry hive: {display_hive}")
 
 
+def registry_policy_root_access_state(
+    display_hive: str,
+    root_path: str,
+) -> tuple[bool, str]:
+    full_path = f"{display_hive}\\{root_path}"
+
+    try:
+        with winreg.OpenKey(
+            _registry_hive(display_hive),
+            root_path,
+            0,
+            winreg.KEY_READ,
+        ):
+            return True, "Present"
+    except FileNotFoundError:
+        return False, "Absent"
+    except PermissionError as exc:
+        return False, f"Access denied: {exc}"
+    except OSError as exc:
+        return False, str(exc)
+
+
 def registry_policy_root_status() -> list[str]:
     present: list[str] = []
 
     for display_hive, root_path in POLICY_REGISTRY_ROOTS:
-        try:
-            with winreg.OpenKey(
-                _registry_hive(display_hive),
-                root_path,
-                0,
-                winreg.KEY_READ,
-            ):
-                present.append(
-                    f"{display_hive}\\{root_path}"
-                )
-        except (
-            FileNotFoundError,
-            PermissionError,
-            OSError,
-        ):
-            continue
+        exists, _ = registry_policy_root_access_state(
+            display_hive,
+            root_path,
+        )
+        if exists:
+            present.append(
+                f"{display_hive}\\{root_path}"
+            )
 
     return present
 
@@ -739,21 +753,16 @@ def remove_registry_policy_root(
 ) -> tuple[bool, str]:
     full_path = f"{display_hive}\\{root_path}"
     hive = _registry_hive(display_hive)
+    root_exists, state = registry_policy_root_access_state(
+        display_hive,
+        root_path,
+    )
 
-    try:
-        with winreg.OpenKey(
-            hive,
-            root_path,
-            0,
-            winreg.KEY_READ,
-        ):
-            pass
-    except FileNotFoundError:
+    if not root_exists and state == "Absent":
         return True, "Already absent"
-    except PermissionError as exc:
-        return False, str(exc)
-    except OSError as exc:
-        return False, str(exc)
+
+    if not root_exists:
+        return False, state
 
     try:
         remove_registry_key_tree(
@@ -769,8 +778,17 @@ def remove_registry_policy_root(
         )
         return False, str(exc)
 
-    if full_path in registry_policy_root_status():
+    verified, verification_state = registry_policy_root_access_state(
+        display_hive,
+        root_path,
+    )
+    if verified:
         return False, "The Registry policy root still exists after deletion."
+    if verification_state != "Absent":
+        return False, (
+            "The Registry policy root could not be verified as absent: "
+            f"{verification_state}"
+        )
 
     logger.info(
         f"Removed Registry policy root: {full_path}"
@@ -784,9 +802,16 @@ def force_remove_registry_policy_root(
     logger: Logger,
 ) -> tuple[bool, str]:
     full_path = f"{display_hive}\\{root_path}"
+    root_exists, state = registry_policy_root_access_state(
+        display_hive,
+        root_path,
+    )
 
-    if full_path not in registry_policy_root_status():
+    if not root_exists and state == "Absent":
         return True, "Already absent"
+
+    if not root_exists:
+        return False, state
 
     if not command_exists("reg.exe"):
         return False, "reg.exe was not found."
@@ -801,7 +826,11 @@ def force_remove_registry_policy_root(
         timeout=120,
     )
 
-    if full_path not in registry_policy_root_status():
+    verified, verification_state = registry_policy_root_access_state(
+        display_hive,
+        root_path,
+    )
+    if not verified and verification_state == "Absent":
         logger.info(
             f"Forced Registry policy removal succeeded: {full_path}"
         )
@@ -812,6 +841,11 @@ def force_remove_registry_policy_root(
         or stdout.strip()
         or f"reg delete exit code {code}"
     )
+    if verification_state != "Absent":
+        reason = (
+            f"{reason}; verification state: {verification_state}"
+        )
+
     logger.error(
         f"Forced Registry policy removal failed for {full_path}: {reason}"
     )
@@ -821,7 +855,7 @@ def force_remove_registry_policy_root(
 def backup_registry(
     session: Session,
     logger: Logger,
-) -> list[str]:
+) -> tuple[bool, list[str]]:
     directory = (
         session.directory / "Registry"
     )
@@ -831,12 +865,13 @@ def backup_registry(
     )
 
     created: list[str] = []
+    backup_ok = True
 
     if not command_exists("reg.exe"):
-        logger.warn(
-            "reg.exe was not found."
+        logger.error(
+            "reg.exe was not found. Registry backup cannot continue."
         )
-        return created
+        return False, created
 
     for display_hive, root_path in POLICY_REGISTRY_ROOTS:
         base_name = _registry_backup_name(
@@ -853,33 +888,27 @@ def backup_registry(
         )
 
         full_path = f"{display_hive}\\{root_path}"
+        root_exists, state = registry_policy_root_access_state(
+            display_hive,
+            root_path,
+        )
 
-        try:
-            with winreg.OpenKey(
-                _registry_hive(display_hive),
-                root_path,
-                0,
-                winreg.KEY_READ,
-            ):
-                root_present = True
-        except FileNotFoundError:
-            root_present = False
-        except (
-            PermissionError,
-            OSError,
-        ) as exc:
-            logger.warn(
-                f"Could not determine Registry backup state for "
-                f"{full_path}: {exc}"
-            )
-            root_present = False
-
-        if not root_present:
+        if not root_exists and state == "Absent":
             absent_marker.write_text(
                 f"Registry root was absent at backup time: {full_path}\\n",
                 encoding="utf-8",
             )
             created.append(str(absent_marker))
+            logger.info(
+                f"Registry root already absent; recorded backup state: {full_path}"
+            )
+            continue
+
+        if not root_exists:
+            logger.error(
+                f"Could not read Registry backup state for {full_path}: {state}"
+            )
+            backup_ok = False
             continue
 
         code, stdout, stderr = run_command(
@@ -902,13 +931,14 @@ def backup_registry(
                 f"Registry backup created: {destination}"
             )
         else:
-            logger.warn(
+            logger.error(
                 f"Registry backup failed for "
                 f"{full_path}: "
                 f"{stderr.strip() or stdout.strip() or 'unknown error'}"
             )
+            backup_ok = False
 
-    return created
+    return backup_ok, created
 
 
 def backup_local_group_policy(
@@ -955,12 +985,7 @@ def backup_local_group_policy(
             logger.error(
                 f"Could not back up {source}: {exc}"
             )
-            return False, backed_up
-
-    return True, backed_up
-
-
-def create_backup(
+            return False, backeddef create_backup(
     session: Session,
     logger: Logger,
 ) -> bool:
@@ -968,7 +993,7 @@ def create_backup(
         "Creating backup before policy removal..."
     )
 
-    registry_backups = backup_registry(
+    registry_backup_ok, registry_backups = backup_registry(
         session,
         logger,
     )
@@ -983,8 +1008,10 @@ def create_backup(
     manifest = {
         "created_at": timestamp(),
         "registry_backups": registry_backups,
+        "registry_backup_success": registry_backup_ok,
         "local_group_policy_backups": gpo_backups,
         "local_group_policy_backup_success": gpo_backup_ok,
+        "backup_success": registry_backup_ok and gpo_backup_ok,
     }
 
     path = (
@@ -1000,14 +1027,24 @@ def create_backup(
         encoding="utf-8",
     )
 
+    if not registry_backup_ok:
+        logger.error(
+            "Registry policy backup did not complete."
+        )
+
     if not gpo_backup_ok:
         logger.error(
             "Local Group Policy backup did not complete."
         )
+
+    if not registry_backup_ok or not gpo_backup_ok:
         return False
 
     logger.info(
         f"Backup manifest saved to {path}."
+    )
+
+    return Trueto {path}."
     )
 
     return True
