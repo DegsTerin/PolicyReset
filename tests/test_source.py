@@ -26,7 +26,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.3.1"', self.source)
+        self.assertIn('VERSION = "4.3.2"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -115,6 +115,9 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn("SecurityIdentifier", self.source)
         self.assertIn("S-1-5-32-544", self.source)
         self.assertIn("SetOwner", self.source)
+        self.assertIn("Add-Type -TypeDefinition", self.source)
+        self.assertIn("AdjustTokenPrivileges", self.source)
+        self.assertIn("reg.exe delete $registryPath /f", self.source)
         self.assertNotIn("A;;GA;;;WD", self.source)
         self.assertNotIn("Everyone", self.source)
 
@@ -260,7 +263,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.3.1"', metadata)
+        self.assertIn('version = "4.3.2"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
@@ -417,5 +420,4 @@ class PolicyResetSourceTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
     unittest.main()
