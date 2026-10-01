@@ -11,7 +11,7 @@
 
 PolicyReset is a terminal-only Windows utility for inspecting, backing up, removing and restoring **Local Group Policy** for the current computer and user.
 
-The project is deliberately narrow in scope. Its main reset operation works with the two Windows Local Group Policy stores:
+The project is deliberately narrow in scope. Its main reset operation removes the two Windows Local Group Policy stores and the four targeted Registry policy roots used by the original script:
 
 ```text
 %WinDir%\System32\GroupPolicy
@@ -24,7 +24,7 @@ PolicyReset does **not** attempt to remove, bypass or disable policy controlled 
 
 ![PolicyReset terminal demonstration](assets/demo.gif)
 
-The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
+The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It predates the 4.3.0 Registry reset extension. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
 
 The captured run demonstrated:
 
@@ -62,7 +62,9 @@ Backup
    ↓
 Remove Local Group Policy stores
    ↓
-Verify stores are absent
+Remove targeted Registry policy roots
+   ↓
+Verify both layers
    ↓
 Write result report
 ```
@@ -103,6 +105,7 @@ PolicyReset collects a baseline before any modification:
 - Presence of management-related Registry locations.
 - Local Group Policy store status.
 - Registry values found under known policy-related locations.
+- Presence of the four targeted Registry policy roots.
 - `gpresult` reports in text, HTML and XML formats.
 - Applied Group Policy object names from the structured XML report.
 
@@ -128,15 +131,15 @@ Stores remaining
 
 When a store cannot be removed normally, the utility can attempt a forced removal of that **specific local Group Policy store**.
 
-The reset operation does not perform broad Registry deletion and does not run `gpupdate /force`.
+The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. It does not delete arbitrary Registry locations outside these fixed targets and does not run `gpupdate /force`.
 
 ### 3. Restore a backup
 
 Restore replaces the current Local Group Policy stores with the state recorded in the selected backup.
 
-A safety backup is created before the restore operation. The resulting store state is verified against the selected backup and a dedicated `restore.json` report is created.
+A safety backup is created before the restore operation. The resulting Local Group Policy store state and targeted Registry policy root state are verified against the selected backup and a dedicated `restore.json` report is created.
 
-Registry exports created as part of the safety backup are retained as backup evidence. They are not automatically imported as part of the normal Local Group Policy store restore.
+Registry exports created during backup are imported during restore so the selected backup can restore both layers.
 
 ### 4. Refresh Group Policy
 
@@ -209,14 +212,18 @@ PolicyReset is intentionally restrictive around destructive operations.
 
 ### Fixed targets
 
-The Local Group Policy reset targets only:
+The reset uses fixed targets only:
 
 ```text
 %WinDir%\System32\GroupPolicy
 %WinDir%\System32\GroupPolicyUsers
+HKCU\Software\Policies
+HKCU\Software\Microsoft\Windows\CurrentVersion\Policies
+HKLM\SOFTWARE\Policies
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies
 ```
 
-There is no arbitrary path input for the destructive Local Group Policy reset.
+The four Registry roots are deleted recursively after backup. There is no arbitrary path input for the destructive reset.
 
 ### Backup before modification
 
