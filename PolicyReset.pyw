@@ -707,6 +707,31 @@ def _enable_process_privileges(
             ("Privileges", _LuidAndAttributes),
         ]
 
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.LookupPrivilegeValueW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.POINTER(_Luid),
+    ]
+    advapi32.LookupPrivilegeValueW.restype = wintypes.BOOL
+    advapi32.AdjustTokenPrivileges.argtypes = [
+        wintypes.HANDLE,
+        wintypes.BOOL,
+        ctypes.POINTER(_TokenPrivileges),
+        wintypes.DWORD,
+        ctypes.POINTER(_TokenPrivileges),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.AdjustTokenPrivileges.restype = wintypes.BOOL
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
     token = wintypes.HANDLE()
     token_access = 0x0008 | 0x0020
 
