@@ -26,7 +26,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.3.2"', self.source)
+        self.assertIn('VERSION = "4.3.3"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -110,27 +110,45 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('"SeTakeOwnershipPrivilege"', self.source)
         self.assertIn('"SeBackupPrivilege"', self.source)
         self.assertIn('"SeRestorePrivilege"', self.source)
-        self.assertIn("def _build_registry_permission_repair_script(", self.source)
-        self.assertIn("RegistryAccessRule", self.source)
-        self.assertIn("SecurityIdentifier", self.source)
+        self.assertIn("def _registry_security_api(", self.source)
+        self.assertIn("GetNamedSecurityInfoW", self.source)
+        self.assertIn("SetNamedSecurityInfoW", self.source)
+        self.assertIn("ConvertSecurityDescriptorToStringSecurityDescriptorW", self.source)
+        self.assertIn("ConvertStringSecurityDescriptorToSecurityDescriptorW", self.source)
         self.assertIn("S-1-5-32-544", self.source)
-        self.assertIn("SetOwner", self.source)
-        self.assertIn("Add-Type -TypeDefinition", self.source)
-        self.assertIn("AdjustTokenPrivileges", self.source)
-        self.assertIn("reg.exe delete $registryPath /f", self.source)
+        self.assertIn("D:(A;;KA;;;BA)(A;;KA;;;SY)", self.source)
         self.assertNotIn("A;;GA;;;WD", self.source)
         self.assertNotIn("Everyone", self.source)
+        self.assertNotIn("Add-Type -TypeDefinition", self.source)
 
-    def test_permission_assisted_registry_script_executes_on_windows(self):
+    def test_permission_assisted_registry_cleanup_executes_on_windows(self):
         if os.name != "nt":
             self.skipTest("Windows-specific registry integration test.")
 
-        functions = {}
-        for name in (
-            "_powershell_quote",
-            "_registry_provider_path",
-            "_build_registry_permission_repair_script",
-        ):
+        function_names = (
+            "_registry_hive",
+            "_registry_security_api",
+            "_registry_native_path",
+            "_registry_security_sddl",
+            "_registry_dacl_from_sddl",
+            "_registry_set_owner_and_dacl",
+            "_registry_restore_security_sddl",
+            "enumerate_registry_key_paths",
+            "_repair_registry_tree_permissions",
+            "_restore_registry_tree_security",
+        )
+        functions = {
+            "__builtins__": __builtins__,
+            "Any": dict,
+            "Path": Path,
+            "ctypes": ctypes,
+            "wintypes": __import__("ctypes").wintypes,
+            "winreg": winreg,
+            "PolicyResetError": RuntimeError,
+            "is_windows": lambda: True,
+        }
+
+        for name in function_names:
             node = next(
                 node
                 for node in ast.walk(self.tree)
@@ -142,71 +160,112 @@ class PolicyResetSourceTests(unittest.TestCase):
                 functions,
             )
 
-        key_name = f"PolicyReset_CI_{uuid.uuid4().hex}"
-        registry_path = rf"Software\\{key_name}"
+        original_path = f"Software\\PolicyReset_CI_{uuid.uuid4().hex}"
+        child_path = original_path + "\\Child"
+
         created = winreg.CreateKey(
             winreg.HKEY_CURRENT_USER,
-            registry_path,
+            child_path,
         )
+        winreg.SetValueEx(
+            created,
+            "Marker",
+            0,
+            winreg.REG_SZ,
+            "PolicyReset CI",
+        )
+        created.Close()
+
+        functions["Path"] = Path
+        logger = type("TestLogger", (), {"info": lambda self, message: None, "warn": lambda self, message: None})()
+
         try:
-            winreg.SetValueEx(
-                created,
-                "Marker",
-                0,
-                winreg.REG_SZ,
-                "PolicyReset CI",
-            )
-            created.Close()
-
-            script = functions["_build_registry_permission_repair_script"](
+            original_sddl = functions["_registry_security_sddl"](
                 "HKCU",
-                registry_path,
-            )
-            encoded = base64.b64encode(
-                script.encode("utf-16le")
-            ).decode("ascii")
-
-            powershell = (
-                shutil.which("pwsh.exe")
-                or shutil.which("powershell.exe")
-            )
-            self.assertIsNotNone(powershell)
-
-            process = subprocess.run(
-                [
-                    powershell,
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-EncodedCommand",
-                    encoded,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60,
-                text=True,
+                original_path,
             )
 
-            self.assertEqual(
+            functions["_registry_restore_security_sddl"](
+                "HKCU",
+                original_path,
+                "O:SYG:SYD:(A;;KR;;;BA)(A;;KA;;;SY)",
+            )
+
+            repaired, backups, reason = functions["_repair_registry_tree_permissions"](
+                "HKCU",
+                original_path,
+                logger,
+            )
+
+            self.assertTrue(repaired, reason)
+            self.assertIn(child_path, backups)
+            self.assertIn(original_path, backups)
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                original_path,
                 0,
-                process.returncode,
-                f"PowerShell cleanup failed: {process.stderr or process.stdout}",
-            )
+                winreg.KEY_WRITE,
+            ):
+                pass
 
-            with self.assertRaises(FileNotFoundError):
-                winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER,
-                    registry_path,
-                    0,
-                    winreg.KEY_READ,
-                )
+            functions["_registry_restore_security_sddl"](
+                "HKCU",
+                original_path,
+                original_sddl,
+            )
         finally:
             try:
-                winreg.DeleteKey(
+                winreg.OpenKey(
                     winreg.HKEY_CURRENT_USER,
-                    registry_path,
+                    original_path,
+                    0,
+                    winreg.KEY_READ,
+                ).Close()
+                # The integration fixture is only used to validate permission repair.
+                # Its cleanup restores the original security and removes the test tree.
+                functions["_registry_restore_security_sddl"](
+                    "HKCU",
+                    original_path,
+                    original_sddl,
                 )
+            except Exception:
+                pass
+
+            try:
+                child = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    original_path,
+                    0,
+                    winreg.KEY_WRITE,
+                )
+                child.Close()
             except OSError:
                 pass
+
+            try:
+                def delete_tree(path):
+                    with winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        path,
+                        0,
+                        winreg.KEY_ALL_ACCESS,
+                    ) as key:
+                        names = [
+                            winreg.EnumKey(key, index)
+                            for index in range(winreg.QueryInfoKey(key)[0])
+                        ]
+                    for name in names:
+                        delete_tree(path + "\\" + name)
+                    winreg.DeleteKey(
+                        winreg.HKEY_CURRENT_USER,
+                        path,
+                    )
+
+                delete_tree(original_path)
+            except OSError:
+                pass
+
 
 
     def test_registry_access_denied_is_not_treated_as_absent(self):
@@ -217,7 +276,7 @@ class PolicyResetSourceTests(unittest.TestCase):
             and node.name == "registry_policy_root_status"
         )
         status_text = ast.get_source_segment(self.source, status) or ""
-        self.assertIn('if exists or state != "Absent":', status_text)
+        self.assertIn('if exists or state not in {"Absent", "Empty"}:', status_text)
 
     def test_registry_backup_records_absent_roots(self):
         self.assertIn('f"{base_name}.absent"', self.source)
@@ -263,7 +322,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.3.2"', metadata)
+        self.assertIn('version = "4.3.3"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
