@@ -985,7 +985,12 @@ def backup_local_group_policy(
             logger.error(
                 f"Could not back up {source}: {exc}"
             )
-            return False, backeddef create_backup(
+            return False, backed_up
+
+    return True, backed_up
+
+
+def create_backup(
     session: Session,
     logger: Logger,
 ) -> bool:
@@ -1042,9 +1047,6 @@ def backup_local_group_policy(
 
     logger.info(
         f"Backup manifest saved to {path}."
-    )
-
-    return Trueto {path}."
     )
 
     return True
