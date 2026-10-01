@@ -102,6 +102,10 @@ class PolicyResetSourceTests(unittest.TestCase):
     def test_registry_backup_records_absent_roots(self):
         self.assertIn('f"{base_name}.absent"', self.source)
         self.assertIn("Registry root was absent at backup time", self.source)
+        self.assertIn('"registry_backup_success": registry_backup_ok', self.source)
+        self.assertIn('"backup_success": registry_backup_ok and gpo_backup_ok', self.source)
+        self.assertIn('if not registry_backup_ok:', self.source)
+
 
     def test_reset_removes_registry_policy_roots(self):
         reset = next(
@@ -130,6 +134,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('"import"', restore_text)
         self.assertIn("registry_backup_states", restore_text)
         self.assertIn("Registry policy roots: ", restore_text)
+        self.assertIn('"import"', restore_text)
 
     def test_operation_sessions_are_distinct(self):
         self.assertIn('operation_session = create_session()', self.source)
