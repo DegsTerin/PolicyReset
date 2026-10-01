@@ -28,7 +28,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.3.3"', self.source)
+        self.assertIn('VERSION = "4.3.4"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -57,6 +57,7 @@ class PolicyResetSourceTests(unittest.TestCase):
             "[3] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup",
             "[4] VIEW LATEST POLICYRESET REPORT: Display the latest operation report",
             "[5] REFRESH GROUP POLICY: Run gpupdate /force separately",
+            "[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports",
             "[0] EXIT",
         ):
             self.assertIn(item, self.source)
@@ -91,6 +92,16 @@ class PolicyResetSourceTests(unittest.TestCase):
     def test_gpupdate_output_is_saved_not_echoed_to_ui(self):
         self.assertIn('output_file = session.directory / "gpupdate.txt"', self.source)
         self.assertNotIn('logger.info(stdout.strip())', self.source)
+
+    def test_delete_all_backups_is_scoped_to_backup_artefacts(self):
+        self.assertIn("BACKUP_ARTIFACT_NAMES = (", self.source)
+        self.assertIn('"LocalGroupPolicy",', self.source)
+        self.assertIn('"Registry",', self.source)
+        self.assertIn('"backup-manifest.json",', self.source)
+        self.assertIn("def find_backup_sessions(", self.source)
+        self.assertIn("def delete_all_backups(", self.source)
+        self.assertIn("Diagnostic reports, operation reports and log files are preserved.", self.source)
+        self.assertIn('[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports', self.source)
 
     def test_registry_values_are_reported_separately(self):
         self.assertIn('"registry_policy_values_before": [', self.source)
@@ -317,7 +328,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.3.3"', metadata)
+        self.assertIn('version = "4.3.4"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
