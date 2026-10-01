@@ -24,7 +24,7 @@ PolicyReset does **not** attempt to remove, bypass or disable policy controlled 
 
 ![PolicyReset terminal demonstration](assets/demo.gif)
 
-The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It predates the 4.3.0 Registry reset extension and the 4.3.1 protected-Registry cleanup fix. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
+The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It predates the 4.3.0 Registry reset extension and the 4.3.2 protected-Registry cleanup fix. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
 
 The captured run demonstrated:
 
@@ -131,7 +131,7 @@ Stores remaining
 
 When a store cannot be removed normally, the utility can attempt a forced removal of that **specific local Group Policy store**.
 
-The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. For protected Registry keys, forced removal first uses Windows security APIs through PowerShell to temporarily grant only the local Administrators group the required access, then performs the deletion. The original security descriptors are restored on the remaining keys if the permission-assisted deletion fails. It does not grant permissions to Everyone, delete arbitrary Registry locations, or run `gpupdate /force`.
+The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. For protected Registry keys, forced removal first enables the required Windows token privileges inside the PowerShell cleanup process, then temporarily grants only the local Administrators group the required access. If the PowerShell deletion path fails, the same elevated process attempts `reg.exe` against the fixed target before restoring the original security descriptors on a final failure. It does not grant permissions to Everyone, delete arbitrary Registry locations, or run `gpupdate /force`.
 
 ### 3. Restore a backup
 
