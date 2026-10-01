@@ -1,3 +1,13 @@
+## 4.3.1 - 2026-10-01
+
+### Fixed
+
+- Protected Registry policy roots can now use a controlled permission-assisted removal path when normal key deletion is denied.
+- Windows ownership, backup and restore privileges are enabled for the forced Registry path when available.
+- Permission repair is restricted to the four fixed Registry policy roots and the local Administrators group; it does not grant access to Everyone.
+- Security descriptors of remaining keys are restored on a failed permission-assisted deletion where possible.
+- Registry access-denied roots are no longer treated as absent during final verification.
+
 ## 4.3.0 - 2026-10-01
 
 ### Added
