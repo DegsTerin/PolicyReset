@@ -1,3 +1,22 @@
+## 4.3.0 - 2026-10-01
+
+### Added
+
+- The main reset operation now removes the four Registry policy roots targeted by the original script, after creating a Registry backup.
+- Registry policy root removal has normal and forced paths with post-removal verification.
+- Registry backup sessions now record explicitly absent roots so restoration can preserve an absent state.
+- Restore now restores the targeted Registry policy roots as well as the Local Group Policy stores.
+
+### Changed
+
+- Reset success now requires both Local Group Policy stores and all targeted Registry policy roots to be cleared.
+- Reset reports include Registry root removal, failure, forced-removal and verification results.
+- Security and README documentation now describe the expanded reset scope.
+
+### Fixed
+
+- Corrected reset report restart recommendation logic so it no longer references an undefined local variable.
+
 ## 4.2.5 - 2026-09-30
 
 ### Fixed
