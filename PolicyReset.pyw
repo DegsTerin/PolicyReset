@@ -1944,11 +1944,17 @@ def write_restore_report(
     restore_errors: list[str],
     gpupdate_ok: bool,
     expected_present: list[str],
+    expected_registry_roots: list[str],
+    actual_registry_roots: list[str],
 ) -> Path:
     state_matches = set(after["remaining_stores"]) == set(expected_present)
+    registry_state_matches = (
+        set(actual_registry_roots) == set(expected_registry_roots)
+    )
     operation_succeeded = (
         not restore_errors
         and state_matches
+        and registry_state_matches
         and gpupdate_ok
     )
     data = {
@@ -1960,9 +1966,13 @@ def write_restore_report(
         "expected_present_stores": expected_present,
         "before": before,
         "after": after,
+        "expected_registry_policy_roots": expected_registry_roots,
+        "actual_registry_policy_roots": actual_registry_roots,
         "restore_errors": restore_errors,
         "gpupdate_succeeded": gpupdate_ok,
-        "verification_passed": state_matches,
+        "verification_passed": state_matches and registry_state_matches,
+        "local_gpo_verification_passed": state_matches,
+        "registry_verification_passed": registry_state_matches,
         "operation_succeeded": operation_succeeded,
     }
     return write_json_report(session, "restore.json", data)
@@ -2133,7 +2143,11 @@ def restore_backup(
             )
             continue
 
-        if full_path in registry_policy_root_status():
+        current_exists, current_state = registry_policy_root_access_state(
+            display_hive,
+            root_path,
+        )
+        if current_exists or current_state != "Absent":
             success, reason = remove_registry_policy_root(
                 display_hive,
                 root_path,
@@ -2220,6 +2234,8 @@ def restore_backup(
         restore_errors,
         gpupdate_ok,
         expected_present,
+        expected_registry_roots,
+        sorted(actual_registry_set),
     )
 
     print()
