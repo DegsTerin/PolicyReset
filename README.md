@@ -24,7 +24,7 @@ PolicyReset does **not** attempt to remove, bypass or disable policy controlled 
 
 ![PolicyReset terminal demonstration](assets/demo.gif)
 
-The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It predates the 4.3.0 Registry reset extension and the 4.3.2 protected-Registry cleanup fix. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
+The GIF above is a **replay of the captured Windows terminal validation session for PolicyReset 4.2.4**. It predates the 4.3.0 Registry reset extension and the 4.3.3 protected-Registry cleanup fix. It reproduces the real workflow and terminal output used during testing. It is not a live screen recording.
 
 The captured run demonstrated:
 
@@ -131,7 +131,7 @@ Stores remaining
 
 When a store cannot be removed normally, the utility can attempt a forced removal of that **specific local Group Policy store**.
 
-The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. For protected Registry keys, forced removal first enables the required Windows token privileges inside the PowerShell cleanup process, then temporarily grants only the local Administrators group the required access. If the PowerShell deletion path fails, the same elevated process attempts `reg.exe` against the fixed target before restoring the original security descriptors on a final failure. It does not grant permissions to Everyone, delete arbitrary Registry locations, or run `gpupdate /force`.
+The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. For protected Registry keys, forced removal enables the required Windows token privileges in the PolicyReset process itself, uses native Windows security APIs to take ownership and grant temporary FullControl only to the local Administrators group and SYSTEM, repairs every key in the fixed target tree, and then deletes the tree. If deletion fails, the original security descriptors are restored on the keys that remain. Empty container keys recreated by Windows are not counted as remaining policy data. The operation does not grant permissions to Everyone, delete arbitrary Registry locations, or run `gpupdate /force`.
 
 ### 3. Restore a backup
 
@@ -223,7 +223,7 @@ HKLM\SOFTWARE\Policies
 HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies
 ```
 
-The four Registry roots are deleted recursively after backup. There is no arbitrary path input for the destructive reset.
+The four Registry roots are deleted recursively after backup. Protected Registry trees use native Windows security APIs with the local Administrators group and SYSTEM as the temporary principals. There is no arbitrary path input for the destructive reset.
 
 ### Backup before modification
 
@@ -359,7 +359,7 @@ PolicyReset follows a small set of operational principles:
 
 PolicyReset is a Local Group Policy tool. It does not claim to remove policy delivered by domain controllers, Microsoft Entra ID, MDM, Intune or other organisation-controlled systems.
 
-Registry policy values under the four targeted roots are part of the core reset operation. They are counted before and after removal, and the reset is only reported as successful when no targeted Registry root remains. Registry data outside those four fixed roots is not removed.
+Registry policy values under the four targeted roots are part of the core reset operation. They are counted before and after removal, and the reset is only reported as successful when no policy data remains under the targeted locations. Windows may recreate an empty container key; an empty container is not treated as remaining policy data. Registry data outside those four fixed roots is not removed.
 
 A restart may be appropriate after a real Local Group Policy removal before performing final application-level verification.
 
