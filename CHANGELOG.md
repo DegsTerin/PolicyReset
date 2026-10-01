@@ -1,3 +1,10 @@
+## 4.3.5 - 2026-10-01
+
+### Changed
+
+- Grouped backup restore and backup cleanup under main-menu option [3].
+- Removed the separate top-level backup cleanup option; the cleanup scope and preservation rules are unchanged.
+
 ## 4.3.4 - 2026-10-01
 
 ### Added
