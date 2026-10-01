@@ -1,4 +1,5 @@
 from pathlib import Path
+import ctypes
 import ast
 import base64
 import shutil
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 import uuid
 import winreg
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "PolicyReset.pyw"
@@ -134,15 +136,15 @@ class PolicyResetSourceTests(unittest.TestCase):
             "_registry_set_owner_and_dacl",
             "_registry_restore_security_sddl",
             "enumerate_registry_key_paths",
+            "remove_registry_key_tree",
             "_repair_registry_tree_permissions",
             "_restore_registry_tree_security",
         )
         functions = {
             "__builtins__": __builtins__,
-            "Any": dict,
-            "Path": Path,
+            "Any": Any,
             "ctypes": ctypes,
-            "wintypes": __import__("ctypes").wintypes,
+            "wintypes": __import__("ctypes.wintypes", fromlist=["*"]),
             "winreg": winreg,
             "PolicyResetError": RuntimeError,
             "is_windows": lambda: True,
@@ -160,109 +162,100 @@ class PolicyResetSourceTests(unittest.TestCase):
                 functions,
             )
 
-        original_path = f"Software\\PolicyReset_CI_{uuid.uuid4().hex}"
-        child_path = original_path + "\\Child"
+        root_path = f"Software\\PolicyReset_CI_{uuid.uuid4().hex}"
+        child_path = root_path + "\\Child"
 
-        created = winreg.CreateKey(
+        root = winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER,
+            root_path,
+        )
+        root.Close()
+
+        child = winreg.CreateKey(
             winreg.HKEY_CURRENT_USER,
             child_path,
         )
         winreg.SetValueEx(
-            created,
+            child,
             "Marker",
             0,
             winreg.REG_SZ,
             "PolicyReset CI",
         )
-        created.Close()
+        child.Close()
 
-        functions["Path"] = Path
-        logger = type("TestLogger", (), {"info": lambda self, message: None, "warn": lambda self, message: None})()
+        logger = type(
+            "TestLogger",
+            (),
+            {
+                "info": lambda self, message: None,
+                "warn": lambda self, message: None,
+            },
+        )()
+
+        original_sddl = functions["_registry_security_sddl"](
+            "HKCU",
+            root_path,
+        )
 
         try:
-            original_sddl = functions["_registry_security_sddl"](
-                "HKCU",
-                original_path,
-            )
-
+            # Keep the key readable by Administrators but remove write access.
             functions["_registry_restore_security_sddl"](
                 "HKCU",
-                original_path,
+                root_path,
+                "O:SYG:SYD:(A;;KR;;;BA)(A;;KA;;;SY)",
+            )
+            functions["_registry_restore_security_sddl"](
+                "HKCU",
+                child_path,
                 "O:SYG:SYD:(A;;KR;;;BA)(A;;KA;;;SY)",
             )
 
             repaired, backups, reason = functions["_repair_registry_tree_permissions"](
                 "HKCU",
-                original_path,
+                root_path,
                 logger,
             )
-
             self.assertTrue(repaired, reason)
-            self.assertIn(child_path, backups)
-            self.assertIn(original_path, backups)
-
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                original_path,
-                0,
-                winreg.KEY_WRITE,
-            ):
-                pass
-
-            functions["_registry_restore_security_sddl"](
-                "HKCU",
-                original_path,
-                original_sddl,
+            self.assertEqual(
+                {root_path, child_path},
+                set(backups),
             )
-        finally:
-            try:
+
+            functions["remove_registry_key_tree"](
+                winreg.HKEY_CURRENT_USER,
+                root_path,
+            )
+
+            with self.assertRaises(FileNotFoundError):
                 winreg.OpenKey(
                     winreg.HKEY_CURRENT_USER,
-                    original_path,
+                    root_path,
                     0,
                     winreg.KEY_READ,
-                ).Close()
-                # The integration fixture is only used to validate permission repair.
-                # Its cleanup restores the original security and removes the test tree.
+                )
+        finally:
+            try:
                 functions["_registry_restore_security_sddl"](
                     "HKCU",
-                    original_path,
+                    root_path,
                     original_sddl,
                 )
             except Exception:
                 pass
 
             try:
-                child = winreg.OpenKey(
+                with winreg.OpenKey(
                     winreg.HKEY_CURRENT_USER,
-                    original_path,
+                    root_path,
                     0,
-                    winreg.KEY_WRITE,
+                    winreg.KEY_ALL_ACCESS,
+                ):
+                    pass
+                functions["remove_registry_key_tree"](
+                    winreg.HKEY_CURRENT_USER,
+                    root_path,
                 )
-                child.Close()
-            except OSError:
-                pass
-
-            try:
-                def delete_tree(path):
-                    with winreg.OpenKey(
-                        winreg.HKEY_CURRENT_USER,
-                        path,
-                        0,
-                        winreg.KEY_ALL_ACCESS,
-                    ) as key:
-                        names = [
-                            winreg.EnumKey(key, index)
-                            for index in range(winreg.QueryInfoKey(key)[0])
-                        ]
-                    for name in names:
-                        delete_tree(path + "\\" + name)
-                    winreg.DeleteKey(
-                        winreg.HKEY_CURRENT_USER,
-                        path,
-                    )
-
-                delete_tree(original_path)
             except OSError:
                 pass
 
