@@ -1,3 +1,11 @@
+## 4.3.2 - 2026-10-01
+
+### Fixed
+
+- Protected Registry cleanup now enables SeTakeOwnershipPrivilege, SeBackupPrivilege and SeRestorePrivilege inside the PowerShell process that performs the repair.
+- If the PowerShell Registry provider cannot delete a repaired target, the same process attempts a fixed-target reg.exe deletion before restoring the original security descriptors on a final failure.
+- Updated tests and audit documentation to cover the child-process privilege path and the corrected fallback order.
+
 ## 4.3.1 - 2026-10-01
 
 ### Fixed
