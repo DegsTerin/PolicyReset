@@ -50,17 +50,18 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertNotIn("Press Enter to return to PowerShell...", self.source)
         self.assertNotIn("py .\\PolicyReset.py", self.source)
 
-    def test_flat_main_menu(self):
+    def test_main_menu_contains_backup_management_option(self):
         for item in (
             "[1] DIAGNOSE GROUP POLICY: Scan User and Computer and create report",
             "[2] REMOVE ALL LOCAL GROUP POLICY AND BACKUP: Remove and verify",
-            "[3] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup",
+            "[3] MANAGE GROUP POLICY BACKUPS: Restore or delete PolicyReset backups",
             "[4] VIEW LATEST POLICYRESET REPORT: Display the latest operation report",
             "[5] REFRESH GROUP POLICY: Run gpupdate /force separately",
-            "[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports",
             "[0] EXIT",
         ):
             self.assertIn(item, self.source)
+
+        self.assertNotIn("[6] ", self.source)
 
     def test_fixed_local_gpo_paths(self):
         self.assertIn('"GroupPolicy"', self.source)
@@ -93,7 +94,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('output_file = session.directory / "gpupdate.txt"', self.source)
         self.assertNotIn('logger.info(stdout.strip())', self.source)
 
-    def test_delete_all_backups_is_scoped_to_backup_artefacts(self):
+    def test_backup_management_contains_cleanup_scope(self):
         self.assertIn("BACKUP_ARTIFACT_NAMES = (", self.source)
         self.assertIn('"LocalGroupPolicy",', self.source)
         self.assertIn('"Registry",', self.source)
@@ -101,7 +102,32 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn("def find_backup_sessions(", self.source)
         self.assertIn("def delete_all_backups(", self.source)
         self.assertIn("Diagnostic reports, operation reports and log files are preserved.", self.source)
-        self.assertIn('[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports', self.source)
+
+    def test_backup_management_is_nested_under_option_three(self):
+        management = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "manage_backups"
+        )
+        management_text = ast.get_source_segment(self.source, management) or ""
+        self.assertIn("restore_backup(logger)", management_text)
+        self.assertIn("delete_all_backups(logger)", management_text)
+        self.assertIn("[1] RESTORE GROUP POLICY BACKUP", management_text)
+        self.assertIn("[2] ", management_text)
+
+        main = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "main"
+        )
+        main_text = ast.get_source_segment(self.source, main) or ""
+        self.assertIn(
+            'elif choice == "3":
+                manage_backups(',
+            main_text,
+        )
 
     def test_registry_values_are_reported_separately(self):
         self.assertIn('"registry_policy_values_before": [', self.source)
