@@ -843,6 +843,20 @@ def _registry_security_api() -> dict[str, Any]:
         wintypes.BOOL
     )
 
+    advapi32.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+
+    advapi32.GetSecurityDescriptorGroup.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorGroup.restype = wintypes.BOOL
+
     advapi32.GetSecurityDescriptorDacl.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(wintypes.BOOL),
