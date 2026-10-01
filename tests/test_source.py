@@ -28,7 +28,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.3.5"', self.source)
+        self.assertIn('VERSION = "4.3.6"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -100,6 +100,8 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('"Registry",', self.source)
         self.assertIn('"backup-manifest.json",', self.source)
         self.assertIn("def find_backup_sessions(", self.source)
+        self.assertIn("def delete_backup_session(", self.source)
+        self.assertIn("def delete_selected_backup(", self.source)
         self.assertIn("def delete_all_backups(", self.source)
         self.assertIn("Diagnostic reports, operation reports and log files are preserved.", self.source)
 
@@ -113,8 +115,11 @@ class PolicyResetSourceTests(unittest.TestCase):
         management_text = ast.get_source_segment(self.source, management) or ""
         self.assertIn("restore_backup(logger)", management_text)
         self.assertIn("delete_all_backups(logger)", management_text)
-        self.assertIn("[1] RESTORE GROUP POLICY BACKUP", management_text)
-        self.assertIn("[2] ", management_text)
+        self.assertIn("Available backups", management_text)
+        self.assertIn("[A] DELETE ALL BACKUPS", management_text)
+        self.assertIn("[1] RESTORE BACKUP", management_text)
+        self.assertIn("[2] DELETE BACKUP", management_text)
+        self.assertIn("delete_selected_backup(", management_text)
 
         main = next(
             node
@@ -353,7 +358,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.3.5"', metadata)
+        self.assertIn('version = "4.3.6"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
