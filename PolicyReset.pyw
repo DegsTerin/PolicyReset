@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.8
+PolicyReset 4.3.9
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.8"
+VERSION = "4.3.9"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -1153,6 +1153,25 @@ def enumerate_registry_key_paths(
     return result
 
 
+def _enumerate_registry_children(
+    display_hive: str,
+    key_path: str,
+) -> list[str]:
+    """Enumerate children after the current key has received temporary access."""
+    hive = _registry_hive(display_hive)
+
+    with winreg.OpenKey(
+        hive,
+        key_path,
+        0,
+        winreg.KEY_READ | winreg.KEY_ENUMERATE_SUB_KEYS,
+    ) as key:
+        return [
+            winreg.EnumKey(key, index)
+            for index in range(winreg.QueryInfoKey(key)[0])
+        ]
+
+
 def _repair_registry_tree_permissions(
     display_hive: str,
     root_path: str,
@@ -1160,16 +1179,12 @@ def _repair_registry_tree_permissions(
 ) -> tuple[bool, dict[str, str], str]:
     """Save original security and grant controlled access throughout one fixed tree."""
     backups: dict[str, str] = {}
+    pending = [root_path]
+    repaired_paths: list[str] = []
 
-    try:
-        key_paths = enumerate_registry_key_paths(
-            display_hive,
-            root_path,
-        )
-    except (OSError, PolicyResetError) as exc:
-        return False, backups, f"Could not enumerate Registry tree: {exc}"
+    while pending:
+        key_path = pending.pop()
 
-    for key_path in key_paths:
         try:
             backups[key_path] = _registry_security_sddl(
                 display_hive,
@@ -1179,15 +1194,32 @@ def _repair_registry_tree_permissions(
                 display_hive,
                 key_path,
             )
+            repaired_paths.append(key_path)
         except (OSError, PolicyResetError) as exc:
             return False, backups, (
                 f"Permission repair failed for "
                 f"{display_hive}\\{key_path}: {exc}"
             )
 
+        try:
+            child_names = _enumerate_registry_children(
+                display_hive,
+                key_path,
+            )
+        except (OSError, PolicyResetError) as exc:
+            return False, backups, (
+                f"Could not enumerate Registry children for "
+                f"{display_hive}\\{key_path}: {exc}"
+            )
+
+        pending.extend(
+            f"{key_path}\\{child_name}"
+            for child_name in reversed(child_names)
+        )
+
     logger.info(
         f"Controlled Registry permission repair applied to "
-        f"{display_hive}\\{root_path} and {len(key_paths) - 1} child key(s)."
+        f"{display_hive}\\{root_path} and {len(repaired_paths) - 1} child key(s)."
     )
     return True, backups, ""
 
