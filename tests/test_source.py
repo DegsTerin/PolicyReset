@@ -124,8 +124,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         )
         main_text = ast.get_source_segment(self.source, main) or ""
         self.assertIn(
-            'elif choice == "3":
-                manage_backups(',
+            'elif choice == "3":\n                manage_backups(',
             main_text,
         )
 
