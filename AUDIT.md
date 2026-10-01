@@ -1,4 +1,4 @@
-# PolicyReset 4.3.4 Audit Notes
+# PolicyReset 4.3.5 Audit Notes
 
 - Local Group Policy reset does not run `gpupdate /force`.
 - `gpupdate /force` is a separate explicit operation.
@@ -15,4 +15,4 @@
 - Empty Registry containers recreated without policy data are not treated as remaining policy data during verification.
 - Registry access-denied states are not treated as an absent root during final verification.
 
-- Backup cleanup is constrained to LocalGroupPolicy, Registry and backup-manifest.json artefacts under the PolicyReset Sessions directory; reports and logs are preserved.
+- Backup management is grouped under main-menu option [3]. The cleanup action is constrained to LocalGroupPolicy, Registry and backup-manifest.json artefacts under the PolicyReset Sessions directory; reports and logs are preserved.
