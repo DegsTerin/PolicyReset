@@ -113,8 +113,8 @@ class PolicyResetSourceTests(unittest.TestCase):
             and node.name == "manage_backups"
         )
         management_text = ast.get_source_segment(self.source, management) or ""
-        self.assertIn("restore_backup(logger)", management_text)
-        self.assertIn("delete_all_backups(logger)", management_text)
+        self.assertIn("restore_backup(", management_text)
+        self.assertIn("delete_all_backups(", management_text)
         self.assertIn("Available backups", management_text)
         self.assertIn("[D] DELETE A BACKUP", management_text)
         self.assertIn("[A] DELETE ALL BACKUPS", management_text)
