@@ -1,8 +1,7 @@
 from pathlib import Path
 import ast
 import base64
-import importlib.util
-from importlib.machinery import SourceFileLoader
+import shutil
 import os
 import subprocess
 import tempfile
@@ -121,36 +120,52 @@ class PolicyResetSourceTests(unittest.TestCase):
         if os.name != "nt":
             self.skipTest("Windows-specific registry integration test.")
 
-        module_path = APP
-        loader = SourceFileLoader(
-            "policyreset_runtime",
-            str(module_path),
-        )
-        spec = importlib.util.spec_from_loader(
-            "policyreset_runtime",
-            loader,
-        )
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        functions = {}
+        for name in (
+            "_powershell_quote",
+            "_registry_provider_path",
+            "_build_registry_permission_repair_script",
+        ):
+            node = next(
+                node
+                for node in ast.walk(self.tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == name
+            )
+            exec(
+                ast.get_source_segment(self.source, node),
+                functions,
+            )
 
         key_name = f"PolicyReset_CI_{uuid.uuid4().hex}"
         registry_path = rf"Software\\{key_name}"
-        created = winreg.CreateKey(winreg.HKEY_CURRENT_USER, registry_path)
+        created = winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER,
+            registry_path,
+        )
         try:
-            winreg.SetValueEx(created, "Marker", 0, winreg.REG_SZ, "PolicyReset CI")
+            winreg.SetValueEx(
+                created,
+                "Marker",
+                0,
+                winreg.REG_SZ,
+                "PolicyReset CI",
+            )
             created.Close()
 
-            script = module._build_registry_permission_repair_script(
+            script = functions["_build_registry_permission_repair_script"](
                 "HKCU",
                 registry_path,
             )
             encoded = base64.b64encode(
                 script.encode("utf-16le")
             ).decode("ascii")
-            powershell = module._find_powershell_executable()
+
+            powershell = (
+                shutil.which("pwsh.exe")
+                or shutil.which("powershell.exe")
+            )
+            self.assertIsNotNone(powershell)
 
             process = subprocess.run(
                 [
