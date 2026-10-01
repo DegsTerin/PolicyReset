@@ -24,6 +24,7 @@ MDM, Intune or other remote organisation-controlled policy.
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import datetime as dt
 import json
 import locale
@@ -39,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.0"
+VERSION = "4.3.1"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -677,6 +678,180 @@ def _registry_hive(
     raise ValueError(f"Unsupported Registry hive: {display_hive}")
 
 
+def _enable_process_privileges(
+    privilege_names: tuple[str, ...],
+    logger: Logger,
+) -> bool:
+    """Enable required Windows token privileges for controlled Registry cleanup."""
+    if not is_windows():
+        return False
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class _Luid(ctypes.Structure):
+        _fields_ = [
+            ("LowPart", wintypes.DWORD),
+            ("HighPart", wintypes.LONG),
+        ]
+
+    class _LuidAndAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Luid", _Luid),
+            ("Attributes", wintypes.DWORD),
+        ]
+
+    class _TokenPrivileges(ctypes.Structure):
+        _fields_ = [
+            ("PrivilegeCount", wintypes.DWORD),
+            ("Privileges", _LuidAndAttributes),
+        ]
+
+    token = wintypes.HANDLE()
+    token_access = 0x0008 | 0x0020
+
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(),
+        token_access,
+        ctypes.byref(token),
+    ):
+        error = ctypes.get_last_error()
+        logger.warn(
+            f"Could not open the process token for privilege adjustment (WinError {error})."
+        )
+        return False
+
+    success = True
+    try:
+        for privilege_name in privilege_names:
+            luid = _Luid()
+            if not advapi32.LookupPrivilegeValueW(
+                None,
+                privilege_name,
+                ctypes.byref(luid),
+            ):
+                error = ctypes.get_last_error()
+                logger.warn(
+                    f"Could not resolve Windows privilege {privilege_name} (WinError {error})."
+                )
+                success = False
+                continue
+
+            token_privileges = _TokenPrivileges()
+            token_privileges.PrivilegeCount = 1
+            token_privileges.Privileges.Luid = luid
+            token_privileges.Privileges.Attributes = 0x00000002
+
+            if not advapi32.AdjustTokenPrivileges(
+                token,
+                False,
+                ctypes.byref(token_privileges),
+                0,
+                None,
+                None,
+            ):
+                error = ctypes.get_last_error()
+                logger.warn(
+                    f"Could not enable Windows privilege {privilege_name} (WinError {error})."
+                )
+                success = False
+                continue
+
+            error = ctypes.get_last_error()
+            if error == 1300:
+                logger.warn(
+                    f"Windows privilege {privilege_name} was not assigned to the process."
+                )
+                success = False
+    finally:
+        kernel32.CloseHandle(token)
+
+    return success
+
+
+def _registry_provider_path(
+    display_hive: str,
+    root_path: str,
+) -> str:
+    hive_name = {
+        "HKCU": "HKEY_CURRENT_USER",
+        "HKLM": "HKEY_LOCAL_MACHINE",
+    }.get(display_hive)
+
+    if hive_name is None:
+        raise ValueError(f"Unsupported Registry hive: {display_hive}")
+
+    return f"Registry::{hive_name}\\{root_path}"
+
+
+def _build_registry_permission_repair_script(
+    display_hive: str,
+    root_path: str,
+) -> str:
+    """Build the constrained PowerShell ACL repair and deletion script."""
+    target = _powershell_quote(
+        _registry_provider_path(display_hive, root_path)
+    )
+
+    return f"""
+$ErrorActionPreference = 'Stop'
+$target = '{target}'
+$admin = New-Object System.Security.Principal.NTAccount('BUILTIN\\Administrators')
+$rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+    $admin,
+    [System.Security.AccessControl.RegistryRights]::FullControl,
+    [System.Security.AccessControl.InheritanceFlags]::None,
+    [System.Security.AccessControl.PropagationFlags]::None,
+    [System.Security.AccessControl.AccessControlType]::Allow
+)
+$backups = New-Object System.Collections.Generic.List[object]
+$queue = New-Object System.Collections.Generic.Queue[string]
+$queue.Enqueue($target)
+
+try {{
+    while ($queue.Count -gt 0) {{
+        $current = $queue.Dequeue()
+        $acl = Get-Acl -LiteralPath $current
+        $backups.Add([pscustomobject]@{{Path=$current; Sddl=$acl.Sddl}})
+        $acl.SetOwner($admin)
+        $acl.SetAccessRule($rule)
+        Set-Acl -LiteralPath $current -AclObject $acl
+
+        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force)) {{
+            $queue.Enqueue($child.PSPath)
+        }}
+    }}
+
+    Remove-Item -LiteralPath $target -Recurse -Force
+}}
+catch {{
+    $failure = $_.Exception.Message
+
+    foreach ($saved in ($backups | Sort-Object {{ $_.Path.Length }} -Descending)) {{
+        try {{
+            if (Test-Path -LiteralPath $saved.Path) {{
+                $security = New-Object System.Security.AccessControl.RegistrySecurity
+                $security.SetSecurityDescriptorSddlForm($saved.Sddl)
+                Set-Acl -LiteralPath $saved.Path -AclObject $security
+            }}
+        }} catch {{
+            # Best-effort restoration of security descriptors after a failed deletion.
+        }}
+    }}
+
+    [Console]::Error.WriteLine($failure)
+    exit 1
+}}
+
+if (Test-Path -LiteralPath $target) {{
+    [Console]::Error.WriteLine('The Registry policy root still exists after permission-assisted deletion.')
+    exit 2
+}}
+
+exit 0
+""".strip()
+
+
 def registry_policy_root_access_state(
     display_hive: str,
     root_path: str,
@@ -703,11 +878,11 @@ def registry_policy_root_status() -> list[str]:
     present: list[str] = []
 
     for display_hive, root_path in POLICY_REGISTRY_ROOTS:
-        exists, _ = registry_policy_root_access_state(
+        exists, state = registry_policy_root_access_state(
             display_hive,
             root_path,
         )
-        if exists:
+        if exists or state != "Absent":
             present.append(
                 f"{display_hive}\\{root_path}"
             )
@@ -813,8 +988,73 @@ def force_remove_registry_policy_root(
     if not root_exists:
         return False, state
 
+    privilege_ok = _enable_process_privileges(
+        (
+            "SeTakeOwnershipPrivilege",
+            "SeBackupPrivilege",
+            "SeRestorePrivilege",
+        ),
+        logger,
+    )
+    if not privilege_ok:
+        logger.warn(
+            f"One or more Windows privileges could not be enabled for {full_path}."
+        )
+
+    permission_repair_reason = ""
+
+    try:
+        powershell = _find_powershell_executable()
+        command = _build_registry_permission_repair_script(
+            display_hive,
+            root_path,
+        )
+        import base64
+
+        encoded = base64.b64encode(
+            command.encode("utf-16le")
+        ).decode("ascii")
+
+        code, stdout, stderr = run_command(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded,
+            ],
+            timeout=180,
+        )
+
+        verified, verification_state = registry_policy_root_access_state(
+            display_hive,
+            root_path,
+        )
+        if not verified and verification_state == "Absent" and code == 0:
+            logger.info(
+                f"Permission-assisted Registry policy removal succeeded: {full_path}"
+            )
+            return True, "Removed successfully after controlled permission repair"
+
+        permission_repair_reason = (
+            stderr.strip()
+            or stdout.strip()
+            or f"permission-assisted removal exit code {code}"
+        )
+        if verification_state != "Absent":
+            permission_repair_reason = (
+                f"{permission_repair_reason}; verification state: {verification_state}"
+            )
+    except (OSError, PolicyResetError) as exc:
+        permission_repair_reason = str(exc)
+
+    logger.warn(
+        f"Permission-assisted Registry policy removal did not clear {full_path}: "
+        f"{permission_repair_reason}"
+    )
+
     if not command_exists("reg.exe"):
-        return False, "reg.exe was not found."
+        return False, permission_repair_reason or "reg.exe was not found."
 
     code, stdout, stderr = run_command(
         [
@@ -832,19 +1072,23 @@ def force_remove_registry_policy_root(
     )
     if not verified and verification_state == "Absent":
         logger.info(
-            f"Forced Registry policy removal succeeded: {full_path}"
+            f"Forced Registry policy removal succeeded with reg.exe fallback: {full_path}"
         )
-        return True, "Removed successfully"
+        return True, "Removed successfully with reg.exe fallback"
 
-    reason = (
+    reg_reason = (
         stderr.strip()
         or stdout.strip()
         or f"reg delete exit code {code}"
     )
     if verification_state != "Absent":
-        reason = (
-            f"{reason}; verification state: {verification_state}"
+        reg_reason = (
+            f"{reg_reason}; verification state: {verification_state}"
         )
+
+    reason = "; ".join(
+        item for item in (permission_repair_reason, reg_reason) if item
+    ) or "Unknown Registry deletion error"
 
     logger.error(
         f"Forced Registry policy removal failed for {full_path}: {reason}"
