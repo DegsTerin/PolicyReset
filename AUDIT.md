@@ -1,4 +1,4 @@
-# PolicyReset 4.3.5 Audit Notes
+# PolicyReset 4.3.6 Audit Notes
 
 - Local Group Policy reset does not run `gpupdate /force`.
 - `gpupdate /force` is a separate explicit operation.
