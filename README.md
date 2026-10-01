@@ -133,7 +133,15 @@ When a store cannot be removed normally, the utility can attempt a forced remova
 
 The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. For protected Registry keys, forced removal enables the required Windows token privileges in the PolicyReset process itself, uses native Windows security APIs to take ownership and grant temporary FullControl only to the local Administrators group and SYSTEM, repairs every key in the fixed target tree, and then deletes the tree. If deletion fails, the original security descriptors are restored on the keys that remain. Empty container keys recreated by Windows are not counted as remaining policy data. The operation does not grant permissions to Everyone, delete arbitrary Registry locations, or run `gpupdate /force`.
 
-### 3. Restore a backup
+### 3. Manage Group Policy backups
+
+Option [3] opens a backup-management submenu:
+
+```text
+[1] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup
+[2] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports
+[0] RETURN TO MAIN MENU
+```
 
 Restore replaces the current Local Group Policy stores with the state recorded in the selected backup.
 
@@ -141,23 +149,15 @@ A safety backup is created before the restore operation. The resulting Local Gro
 
 Registry exports created during backup are imported during restore so the selected backup can restore both layers.
 
-### 4. Delete all backups
-
-The main menu provides a dedicated backup cleanup operation:
+The delete action removes only these fixed backup artefacts from `C:\\ProgramData\\PolicyReset\\Sessions\\`:
 
 ```text
-[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports
-```
-
-This removes only these fixed backup artefacts from `C:\ProgramData\PolicyReset\Sessions\`:
-
-```text
-LocalGroupPolicy\
-Registry\
+LocalGroupPolicy\\
+Registry\\
 backup-manifest.json
 ```
 
-Diagnostic reports, operation reports and log files are preserved. The operation requires an explicit `Y` confirmation.
+Diagnostic reports, operation reports and log files are preserved. The action requires an explicit `Y` confirmation.
 
 ### 4. Refresh Group Policy
 
