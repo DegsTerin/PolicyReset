@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.4
+PolicyReset 4.3.5
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.4"
+VERSION = "4.3.5"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -2772,6 +2772,33 @@ def delete_all_backups(
     )
 
 
+def manage_backups(
+    logger: Logger,
+) -> None:
+    """Manage PolicyReset backup sessions from the main backup menu."""
+    print()
+    print("=" * 78)
+    print("MANAGE GROUP POLICY BACKUPS")
+    print("=" * 78)
+    print()
+    print("[1] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup")
+    print("[2] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports")
+    print("[0] RETURN TO MAIN MENU")
+    print()
+
+    choice = input("Select an option: ").strip()
+
+    if choice == "1":
+        restore_backup(logger)
+    elif choice == "2":
+        delete_all_backups(logger)
+    elif choice == "0":
+        return
+    else:
+        print("\nInvalid option.")
+        input("\nPress Enter to return to the main menu...")
+
+
 def restore_backup(
     logger: Logger,
 ) -> None:
@@ -3250,16 +3277,13 @@ def main() -> int:
                 "[2] REMOVE ALL LOCAL GROUP POLICY AND BACKUP: Remove and verify"
             )
             print(
-                "[3] RESTORE GROUP POLICY BACKUP: Restore a previous local policy backup"
+                "[3] MANAGE GROUP POLICY BACKUPS: Restore or delete PolicyReset backups"
             )
             print(
                 "[4] VIEW LATEST POLICYRESET REPORT: Display the latest operation report"
             )
             print(
                 "[5] REFRESH GROUP POLICY: Run gpupdate /force separately"
-            )
-            print(
-                "[6] DELETE ALL POLICYRESET BACKUPS: Remove backup artefacts and preserve reports"
             )
             print(
                 "[0] EXIT"
@@ -3284,7 +3308,7 @@ def main() -> int:
                 )
 
             elif choice == "3":
-                restore_backup(
+                manage_backups(
                     logger,
                 )
 
