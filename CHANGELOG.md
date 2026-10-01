@@ -1,9 +1,16 @@
+## 4.3.8 - 2026-10-01
+
+### Changed
+
+- Removed the confusing D1 backup deletion syntax.
+- [D] now opens the numbered backup list for individual deletion.
+
 ## 4.3.7 - 2026-10-01
 
 ### Changed
 
 - Backup numbers now restore immediately when entered from option [3].
-- Individual backup deletion uses D followed by the backup number.
+- Individual backup deletion is selected through [D] and then a numbered backup.
 - Delete-all remains available with A.
 - Removed the secondary action menu for a selected backup.
 
