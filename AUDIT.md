@@ -1,4 +1,4 @@
-# PolicyReset 4.3.3 Audit Notes
+# PolicyReset 4.3.4 Audit Notes
 
 - Local Group Policy reset does not run `gpupdate /force`.
 - `gpupdate /force` is a separate explicit operation.
@@ -14,3 +14,5 @@
 - Original owner, group and DACL state is captured before repair and restored on keys that remain after a failed deletion.
 - Empty Registry containers recreated without policy data are not treated as remaining policy data during verification.
 - Registry access-denied states are not treated as an absent root during final verification.
+
+- Backup cleanup is constrained to LocalGroupPolicy, Registry and backup-manifest.json artefacts under the PolicyReset Sessions directory; reports and logs are preserved.
