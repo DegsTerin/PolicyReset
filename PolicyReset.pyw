@@ -885,8 +885,8 @@ def _registry_native_path(
     root_path: str,
 ) -> str:
     hive_name = {
-        "HKCU": "HKEY_CURRENT_USER",
-        "HKLM": "HKEY_LOCAL_MACHINE",
+        "HKCU": "CURRENT_USER",
+        "HKLM": "MACHINE",
     }.get(display_hive)
 
     if hive_name is None:
@@ -1264,7 +1264,7 @@ def registry_policy_root_status() -> list[str]:
             display_hive,
             root_path,
         )
-        if exists or state != "Absent":
+        if exists or state not in {"Absent", "Empty"}:
             present.append(
                 f"{display_hive}\\{root_path}"
             )
