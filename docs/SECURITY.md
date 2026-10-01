@@ -13,7 +13,7 @@ HKLM\SOFTWARE\Policies
 HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies
 ```
 
-A backup is created before removal. The four Registry roots are deleted recursively after backup. Forced removal is available for failed Local Group Policy stores and failed Registry policy roots. Registry exports form part of the restoration backup.
+A backup is created before removal. The four Registry roots are deleted recursively after backup. Forced Registry removal first uses a controlled PowerShell/.NET security-descriptor path for the fixed target, enabling only the local Administrators group to obtain the required access. If that path fails, the existing reg.exe fallback is attempted. Registry exports form part of the restoration backup.
 
 The tool does not bypass or remove Active Directory, Microsoft Entra ID, MDM or other remote organisation-controlled policy.
 
@@ -24,3 +24,7 @@ Generated backups and reports may contain machine-specific information and must 
 ## Policy refresh separation
 
 `gpupdate /force` is intentionally not part of Local Group Policy removal. It is exposed as a separate explicit operation. Restore uses a refresh only after replacing the local stores so the restored policy can be processed.
+
+## Protected Registry removal
+
+The forced Registry path enables the Windows token privileges required for ownership and recovery operations, then uses the Windows Registry provider and .NET security descriptors for the fixed target only. It adds FullControl for the local Administrators group to the affected keys, performs the deletion, and attempts to restore saved security descriptors when deletion fails. It does not grant access to Everyone and it does not accept arbitrary Registry paths.
