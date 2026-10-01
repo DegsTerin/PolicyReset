@@ -821,9 +821,9 @@ def _build_registry_permission_repair_script(
     return f"""
 $ErrorActionPreference = 'Stop'
 $target = '{target}'
-$admin = New-Object System.Security.Principal.NTAccount('BUILTIN\\Administrators')
-$rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-    $admin,
+$adminSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+$rule = [System.Security.AccessControl.RegistryAccessRule]::new(
+    $adminSid,
     [System.Security.AccessControl.RegistryRights]::FullControl,
     [System.Security.AccessControl.InheritanceFlags]::None,
     [System.Security.AccessControl.PropagationFlags]::None,
@@ -838,7 +838,7 @@ try {{
         $current = $queue.Dequeue()
         $acl = Get-Acl -LiteralPath $current
         $backups.Add([pscustomobject]@{{Path=$current; Sddl=$acl.Sddl}})
-        $acl.SetOwner($admin)
+        $acl.SetOwner($adminSid)
         $acl.SetAccessRule($rule)
         Set-Acl -LiteralPath $current -AclObject $acl
 
