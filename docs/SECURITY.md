@@ -15,7 +15,7 @@ HKLM\SOFTWARE\Policies
 HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies
 ```
 
-A backup is created before removal. The four Registry roots are deleted recursively after backup. Forced Registry removal first uses a controlled PowerShell/.NET security-descriptor path for the fixed target, enabling only the local Administrators group to obtain the required access. If that path fails, the existing reg.exe fallback is attempted. Registry exports form part of the restoration backup.
+A backup is created before removal. The four Registry roots are deleted recursively after backup. Forced Registry removal enables the required token privileges in PolicyReset itself and uses native Windows security APIs for the fixed target, taking ownership and granting temporary FullControl only to the local Administrators group and SYSTEM. All discovered keys in the target tree are repaired before deletion. If deletion fails, saved owner, group and DACL descriptors are restored on keys that remain. Registry exports form part of the restoration backup.
 
 The tool does not bypass or remove Active Directory, Microsoft Entra ID, MDM or other remote organisation-controlled policy.
 
@@ -29,4 +29,4 @@ Generated backups and reports may contain machine-specific information and must 
 
 ## Protected Registry removal
 
-The forced Registry path enables the required Windows token privileges inside the PowerShell process that performs the ACL repair. It then uses the Windows Registry provider and .NET security descriptors for the fixed target only. It adds FullControl for the local Administrators group to the affected keys. If PowerShell deletion fails after the permission repair, the same elevated process attempts a fixed-target reg.exe deletion before restoring saved security descriptors on a final failure. It does not grant access to Everyone and it does not accept arbitrary Registry paths.
+The forced Registry path runs in the elevated PolicyReset process. It enables SeTakeOwnershipPrivilege, SeBackupPrivilege and SeRestorePrivilege, captures owner/group/DACL state, uses SetNamedSecurityInfoW for the fixed registry keys, and grants temporary FullControl only to the local Administrators group and SYSTEM. The saved security descriptors are restored on keys that remain after a failed deletion. It does not grant access to Everyone and it does not accept arbitrary Registry paths.
