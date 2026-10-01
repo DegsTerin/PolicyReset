@@ -28,7 +28,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.3.7"', self.source)
+        self.assertIn('VERSION = "4.3.8"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -116,12 +116,12 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn("restore_backup(logger)", management_text)
         self.assertIn("delete_all_backups(logger)", management_text)
         self.assertIn("Available backups", management_text)
-        self.assertIn("To restore a backup, enter its number.", management_text)
-        self.assertIn("To delete a backup, enter D followed by its number.", management_text)
-        self.assertIn("To delete all backups, enter A.", management_text)
+        self.assertIn("[D] DELETE A BACKUP", management_text)
         self.assertIn("[A] DELETE ALL BACKUPS", management_text)
+        self.assertIn("[0] RETURN TO MAIN MENU", management_text)
+        self.assertNotIn("D followed by its number", management_text)
         self.assertNotIn("SELECTED GROUP POLICY BACKUP", management_text)
-        self.assertIn("delete_selected_backup(", management_text)
+        self.assertIn("delete_backup_from_list(", management_text)
         self.assertIn("restore_backup(", management_text)
 
         main = next(
@@ -361,7 +361,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.3.7"', metadata)
+        self.assertIn('version = "4.3.8"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
