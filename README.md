@@ -148,7 +148,7 @@ Backup actions:
 
 ```text
 1       -> restore backup 1
-D1      -> delete backup 1
+D       -> open the deletion list
 A       -> delete all backups
 ```
 
