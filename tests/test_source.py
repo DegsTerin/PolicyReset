@@ -1,7 +1,13 @@
 from pathlib import Path
 import ast
+import base64
+import importlib.util
+import os
+import subprocess
 import tempfile
 import unittest
+import uuid
+import winreg
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "PolicyReset.pyw"
@@ -109,6 +115,74 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn("SetOwner", self.source)
         self.assertNotIn("A;;GA;;;WD", self.source)
         self.assertNotIn("Everyone", self.source)
+
+    def test_permission_assisted_registry_script_executes_on_windows(self):
+        if os.name != "nt":
+            self.skipTest("Windows-specific registry integration test.")
+
+        module_path = APP
+        spec = importlib.util.spec_from_file_location(
+            "policyreset_runtime",
+            module_path,
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        key_name = f"PolicyReset_CI_{uuid.uuid4().hex}"
+        registry_path = rf"Software\\{key_name}"
+        created = winreg.CreateKey(winreg.HKEY_CURRENT_USER, registry_path)
+        try:
+            winreg.SetValueEx(created, "Marker", 0, winreg.REG_SZ, "PolicyReset CI")
+            created.Close()
+
+            script = module._build_registry_permission_repair_script(
+                "HKCU",
+                registry_path,
+            )
+            encoded = base64.b64encode(
+                script.encode("utf-16le")
+            ).decode("ascii")
+            powershell = module._find_powershell_executable()
+
+            process = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                    encoded,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                text=True,
+            )
+
+            self.assertEqual(
+                0,
+                process.returncode,
+                f"PowerShell cleanup failed: {process.stderr or process.stdout}",
+            )
+
+            with self.assertRaises(FileNotFoundError):
+                winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    registry_path,
+                    0,
+                    winreg.KEY_READ,
+                )
+        finally:
+            try:
+                winreg.DeleteKey(
+                    winreg.HKEY_CURRENT_USER,
+                    registry_path,
+                )
+            except OSError:
+                pass
+
 
     def test_registry_access_denied_is_not_treated_as_absent(self):
         status = next(
