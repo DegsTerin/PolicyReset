@@ -1052,20 +1052,11 @@ catch {{
             }}
         }}
         catch {{
-            $failureParts.Add(
-                (
-                    "Security descriptor restoration failed for "
-                    + $saved.Path
-                    + ": "
-                    + $_.Exception.Message
-                )
-            )
+            $failureParts.Add(("Security descriptor restoration failed for " + $saved.Path + ": " + $_.Exception.Message))
         }}
     }}
 
-    [Console]::Error.WriteLine(
-        $failureParts -join [Environment]::NewLine
-    )
+    [Console]::Error.WriteLine(($failureParts -join [Environment]::NewLine))
     exit 1
 }}
 
