@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.2.5
+PolicyReset 4.3.0
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -39,7 +39,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.2.5"
+VERSION = "4.3.0"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -655,6 +655,169 @@ def extract_applied_group_policy_objects(
     return [], "unavailable"
 
 
+def _registry_backup_name(
+    display_hive: str,
+    root_path: str,
+) -> str:
+    safe_name = (
+        root_path
+        .replace("\\", "_")
+        .replace(" ", "_")
+    )
+    return f"{display_hive}_{safe_name}"
+
+
+def _registry_hive(
+    display_hive: str,
+) -> int:
+    if display_hive == "HKCU":
+        return winreg.HKEY_CURRENT_USER
+    if display_hive == "HKLM":
+        return winreg.HKEY_LOCAL_MACHINE
+    raise ValueError(f"Unsupported Registry hive: {display_hive}")
+
+
+def registry_policy_root_status() -> list[str]:
+    present: list[str] = []
+
+    for display_hive, root_path in POLICY_REGISTRY_ROOTS:
+        try:
+            with winreg.OpenKey(
+                _registry_hive(display_hive),
+                root_path,
+                0,
+                winreg.KEY_READ,
+            ):
+                present.append(
+                    f"{display_hive}\\{root_path}"
+                )
+        except (
+            FileNotFoundError,
+            PermissionError,
+            OSError,
+        ):
+            continue
+
+    return present
+
+
+def remove_registry_key_tree(
+    hive: int,
+    subkey: str,
+) -> None:
+    """Delete a Registry key and all descendants."""
+    with winreg.OpenKey(
+        hive,
+        subkey,
+        0,
+        winreg.KEY_ALL_ACCESS,
+    ) as key:
+        child_names: list[str] = []
+        info = winreg.QueryInfoKey(key)
+
+        for index in range(info[0]):
+            child_names.append(
+                winreg.EnumKey(key, index)
+            )
+
+    for child_name in child_names:
+        remove_registry_key_tree(
+            hive,
+            f"{subkey}\\{child_name}",
+        )
+
+    winreg.DeleteKey(
+        hive,
+        subkey,
+    )
+
+
+def remove_registry_policy_root(
+    display_hive: str,
+    root_path: str,
+    logger: Logger,
+) -> tuple[bool, str]:
+    full_path = f"{display_hive}\\{root_path}"
+    hive = _registry_hive(display_hive)
+
+    try:
+        with winreg.OpenKey(
+            hive,
+            root_path,
+            0,
+            winreg.KEY_READ,
+        ):
+            pass
+    except FileNotFoundError:
+        return True, "Already absent"
+    except PermissionError as exc:
+        return False, str(exc)
+    except OSError as exc:
+        return False, str(exc)
+
+    try:
+        remove_registry_key_tree(
+            hive,
+            root_path,
+        )
+    except (
+        PermissionError,
+        OSError,
+    ) as exc:
+        logger.warn(
+            f"Normal Registry policy removal failed for {full_path}: {exc}"
+        )
+        return False, str(exc)
+
+    if full_path in registry_policy_root_status():
+        return False, "The Registry policy root still exists after deletion."
+
+    logger.info(
+        f"Removed Registry policy root: {full_path}"
+    )
+    return True, "Removed successfully"
+
+
+def force_remove_registry_policy_root(
+    display_hive: str,
+    root_path: str,
+    logger: Logger,
+) -> tuple[bool, str]:
+    full_path = f"{display_hive}\\{root_path}"
+
+    if full_path not in registry_policy_root_status():
+        return True, "Already absent"
+
+    if not command_exists("reg.exe"):
+        return False, "reg.exe was not found."
+
+    code, stdout, stderr = run_command(
+        [
+            "reg.exe",
+            "delete",
+            full_path,
+            "/f",
+        ],
+        timeout=120,
+    )
+
+    if full_path not in registry_policy_root_status():
+        logger.info(
+            f"Forced Registry policy removal succeeded: {full_path}"
+        )
+        return True, "Removed successfully"
+
+    reason = (
+        stderr.strip()
+        or stdout.strip()
+        or f"reg delete exit code {code}"
+    )
+    logger.error(
+        f"Forced Registry policy removal failed for {full_path}: {reason}"
+    )
+    return False, reason
+
+
 def backup_registry(
     session: Session,
     logger: Logger,
@@ -676,22 +839,54 @@ def backup_registry(
         return created
 
     for display_hive, root_path in POLICY_REGISTRY_ROOTS:
-        safe_name = (
-            root_path
-            .replace("\\", "_")
-            .replace(" ", "_")
+        base_name = _registry_backup_name(
+            display_hive,
+            root_path,
         )
-
         destination = (
             directory
-            / f"{display_hive}_{safe_name}.reg"
+            / f"{base_name}.reg"
         )
+        absent_marker = (
+            directory
+            / f"{base_name}.absent"
+        )
+
+        full_path = f"{display_hive}\\{root_path}"
+
+        try:
+            with winreg.OpenKey(
+                _registry_hive(display_hive),
+                root_path,
+                0,
+                winreg.KEY_READ,
+            ):
+                root_present = True
+        except FileNotFoundError:
+            root_present = False
+        except (
+            PermissionError,
+            OSError,
+        ) as exc:
+            logger.warn(
+                f"Could not determine Registry backup state for "
+                f"{full_path}: {exc}"
+            )
+            root_present = False
+
+        if not root_present:
+            absent_marker.write_text(
+                f"Registry root was absent at backup time: {full_path}\\n",
+                encoding="utf-8",
+            )
+            created.append(str(absent_marker))
+            continue
 
         code, stdout, stderr = run_command(
             [
                 "reg.exe",
                 "export",
-                f"{display_hive}\\{root_path}",
+                full_path,
                 str(destination),
                 "/y",
             ],
@@ -709,7 +904,7 @@ def backup_registry(
         else:
             logger.warn(
                 f"Registry backup failed for "
-                f"{display_hive}\\{root_path}: "
+                f"{full_path}: "
                 f"{stderr.strip() or stdout.strip() or 'unknown error'}"
             )
 
@@ -1038,6 +1233,13 @@ def write_reset_report(
     already_absent: list[str],
     registry_before: list[PolicyEntry],
     registry_after: list[PolicyEntry],
+    registry_removed: list[str],
+    registry_already_absent: list[str],
+    registry_failures: list[RemovalFailure],
+    registry_forced_removed: list[str],
+    registry_still_failed: list[RemovalFailure],
+    registry_roots_before: list[str],
+    registry_roots_after: list[str],
 ) -> Path:
     data = {
         "application": APP_NAME,
@@ -1055,9 +1257,31 @@ def write_reset_report(
             asdict(item)
             for item in still_failed
         ],
+        "registry_policy_roots_before": registry_roots_before,
+        "registry_policy_roots_removed": registry_removed,
+        "registry_policy_roots_already_absent": registry_already_absent,
+        "registry_policy_root_failures": [
+            asdict(item)
+            for item in registry_failures
+        ],
+        "registry_policy_roots_forced_removed": registry_forced_removed,
+        "registry_policy_roots_still_failed": [
+            asdict(item)
+            for item in registry_still_failed
+        ],
+        "registry_policy_roots_after": registry_roots_after,
         "gpupdate_succeeded": gpupdate_ok,
-        "gpupdate_scope": "not_run_during_reset" if gpupdate_ok is None else "run_during_operation",
-        "operation_succeeded": not still_failed and not after["remaining_stores"],
+        "gpupdate_scope": (
+            "not_run_during_reset"
+            if gpupdate_ok is None
+            else "run_during_operation"
+        ),
+        "operation_succeeded": (
+            not still_failed
+            and not after["remaining_stores"]
+            and not registry_still_failed
+            and not registry_roots_after
+        ),
         "management": asdict(management),
         "applied_group_policy_objects_reported": applied_objects,
         "applied_group_policy_objects_source": applied_objects_source,
@@ -1071,9 +1295,14 @@ def write_reset_report(
             item.full_path for item in registry_after
         ],
         "restart_recommended": bool(
-            before["remaining_count"] > 0
+            (
+                before["remaining_count"] > 0
+                or registry_before
+            )
             and not still_failed
-            and not remaining_stores
+            and not after["remaining_stores"]
+            and not registry_still_failed
+            and not registry_roots_after
         ),
     }
 
@@ -1106,20 +1335,28 @@ def show_removal_result(
     already_absent: list[str],
     registry_before_count: int,
     registry_after_count: int,
+    registry_removed: list[str],
+    registry_already_absent: list[str],
+    registry_failures: list[RemovalFailure],
+    registry_forced_removed: list[str],
+    registry_still_failed: list[RemovalFailure],
+    registry_roots_after: list[str],
 ) -> None:
     print()
     print("=" * 78)
 
-    if before_count == 0 and not still_failed and not remaining_stores:
-        print("LOCAL GROUP POLICY ALREADY CLEAR")
-    elif (
-        before_count > 0
-        and not failures
-        and not still_failed
+    operation_clear = (
+        not still_failed
         and not remaining_stores
-    ):
+        and not registry_still_failed
+        and not registry_roots_after
+    )
+
+    if before_count == 0 and registry_before_count == 0 and operation_clear:
+        print("LOCAL GROUP POLICY ALREADY CLEAR")
+    elif operation_clear:
         print("GROUP POLICIES REMOVED SUCCESSFULLY")
-    elif still_failed:
+    elif still_failed or registry_still_failed or remaining_stores or registry_roots_after:
         print("GROUP POLICY REMOVAL COMPLETED WITH ERRORS")
     else:
         print("GROUP POLICY REMOVAL COMPLETED")
@@ -1144,15 +1381,40 @@ def show_removal_result(
             print(f"         {item.reason}")
 
     if forced_removed:
-        print("\nForced removal")
+        print("\nForced Local Group Policy removal")
         for item in forced_removed:
             print(f"  [OK] {item}")
 
     if still_failed:
-        print("\nStill not removed")
+        print("\nLocal Group Policy stores still not removed")
         for item in still_failed:
             print(f"  [FAIL] {item.path}")
             print(f"         {item.reason}")
+
+    print("\nRegistry policy roots")
+    print(f"  Present before reset: {registry_before_count > 0}")
+    print(f"  Removed successfully: {len(registry_removed) + len(registry_forced_removed)}")
+    print(f"  Already absent: {len(registry_already_absent)}")
+    print(f"  Removal failed: {len(registry_still_failed)}")
+
+    if registry_failures:
+        print("\nNormal Registry removal failures")
+        for item in registry_failures:
+            print(f"  [FAIL] {item.path}")
+            print(f"         {item.reason}")
+
+    if registry_forced_removed:
+        print("\nForced Registry policy removal")
+        for item in registry_forced_removed:
+            print(f"  [OK] {item}")
+
+    if registry_still_failed:
+        print("\nRegistry policy roots still present")
+        for item in registry_still_failed:
+            print(f"  [FAIL] {item.path}")
+            print(f"         {item.reason}")
+
+    print(f"  Registry roots remaining: {len(registry_roots_after)}")
 
     print("\nGroup Policy refresh")
     if gpupdate_ok is None:
@@ -1167,10 +1429,18 @@ def show_removal_result(
     print("\nVerification")
     if remaining_stores:
         for path in remaining_stores:
-            print(f"  [FAIL] Store remains: {path}")
+            print(f"  [FAIL] Local Group Policy store remains: {path}")
     else:
         print(
             "  [OK] Both local Group Policy stores are absent."
+        )
+
+    if registry_roots_after:
+        for path in registry_roots_after:
+            print(f"  [FAIL] Registry policy root remains: {path}")
+    else:
+        print(
+            "  [OK] All targeted Registry policy roots are absent."
         )
 
     if applied_objects:
@@ -1196,22 +1466,26 @@ def show_removal_result(
     print("\nRegistry policy values")
     print(f"  Before reset: {registry_before_count}")
     print(f"  After reset: {registry_after_count}")
-    if registry_after_count:
-        print(
-            "  [INFO] These Registry values are reported separately "
-            "and are not used to determine whether Local Group Policy stores remain."
-        )
 
     print()
-    stores_cleared = not still_failed and not remaining_stores
+    operation_success = (
+        not still_failed
+        and not remaining_stores
+        and not registry_still_failed
+        and not registry_roots_after
+    )
 
-    if before_count == 0 and stores_cleared:
-        print("No Local Group Policy stores were present before the operation.")
-    elif stores_cleared:
-        print("Local Group Policy stores removed successfully.")
+    if (
+        before_count == 0
+        and registry_before_count == 0
+        and operation_success
+    ):
+        print("No targeted Local Group Policy data was present before the operation.")
+    elif operation_success:
+        print("Local Group Policy and targeted Registry policy roots removed successfully.")
         print("Restart Windows before final verification.")
     else:
-        print("Some Local Group Policy stores could not be fully removed.")
+        print("Some Local Group Policy or Registry policy data could not be fully removed.")
         print("Review the failure details above and retry the failed operation.")
 
     print(f"\nReport: {report}")
@@ -1361,7 +1635,7 @@ def remove_all_local_group_policy(
     print("=" * 78)
     print()
     print(
-        "This removes Local Group Policy for:"
+        "This removes Local Group Policy and its targeted Registry policy roots for:"
     )
     print(
         "  - Computer"
@@ -1374,8 +1648,19 @@ def remove_all_local_group_policy(
         "A backup will be created before any removal."
     )
     print(
+        "The Registry cleanup targets the same four policy roots used by "
+        "the original PolicyReset script."
+    )
+    print(
         "Remote Active Directory, Microsoft Entra ID and MDM "
         "policy are outside the scope of this operation."
+    )
+    print()
+    print(
+        "WARNING: Registry policy roots are deleted recursively after backup."
+    )
+    print(
+        "Existing values under these four roots may be removed."
     )
     print()
 
@@ -1408,6 +1693,7 @@ def remove_all_local_group_policy(
 
     before = local_gpo_status()
     registry_before = scan_policy_registry(logger)
+    registry_roots_before = registry_policy_root_status()
 
     if not create_backup(
         session,
@@ -1481,13 +1767,73 @@ def remove_all_local_group_policy(
         else:
             still_failed = failures
 
+    registry_removed: list[str] = []
+    registry_already_absent: list[str] = []
+    registry_failures: list[RemovalFailure] = []
+
+    for display_hive, root_path in POLICY_REGISTRY_ROOTS:
+        full_path = f"{display_hive}\\{root_path}"
+        success, reason = remove_registry_policy_root(
+            display_hive,
+            root_path,
+            logger,
+        )
+
+        if success and reason == "Already absent":
+            registry_already_absent.append(full_path)
+        elif success:
+            registry_removed.append(full_path)
+        else:
+            registry_failures.append(
+                RemovalFailure(
+                    path=full_path,
+                    reason=reason,
+                )
+            )
+
+    registry_forced_removed: list[str] = []
+    registry_still_failed: list[RemovalFailure] = []
+
+    if registry_failures:
+        print()
+        print(
+            f"{len(registry_failures)} Registry policy root(s) "
+            "could not be removed normally."
+        )
+
+        if confirm_yes_no(
+            "Force removal of the failed Registry policy roots?"
+        ):
+            for failure in registry_failures:
+                hive, root_path = failure.path.split("\\", 1)
+                success, reason = force_remove_registry_policy_root(
+                    hive,
+                    root_path,
+                    logger,
+                )
+
+                if success:
+                    registry_forced_removed.append(
+                        failure.path
+                    )
+                else:
+                    registry_still_failed.append(
+                        RemovalFailure(
+                            path=failure.path,
+                            reason=reason,
+                        )
+                    )
+        else:
+            registry_still_failed = registry_failures
+
     print()
     print(
-        "Verifying Local Group Policy stores..."
+        "Verifying Local Group Policy and Registry policy roots..."
     )
 
     after = local_gpo_status()
     registry_after = scan_policy_registry(logger)
+    registry_roots_after = registry_policy_root_status()
 
     report = write_reset_report(
         session,
@@ -1503,6 +1849,13 @@ def remove_all_local_group_policy(
         already_absent,
         registry_before,
         registry_after,
+        registry_removed,
+        registry_already_absent,
+        registry_failures,
+        registry_forced_removed,
+        registry_still_failed,
+        registry_roots_before,
+        registry_roots_after,
     )
 
     show_removal_result(
@@ -1519,6 +1872,12 @@ def remove_all_local_group_policy(
         already_absent,
         len(registry_before),
         len(registry_after),
+        registry_removed,
+        registry_already_absent,
+        registry_failures,
+        registry_forced_removed,
+        registry_still_failed,
+        registry_roots_after,
     )
 
     input(
@@ -1635,6 +1994,8 @@ def restore_backup(
         return
 
     backup_root = selected / "LocalGroupPolicy"
+    registry_backup_root = selected / "Registry"
+
     if not backup_root.exists():
         print("\nThe selected session does not contain a Local Group Policy backup.")
         input("\nPress Enter to return to the main menu...")
@@ -1644,6 +2005,32 @@ def restore_backup(
         str(directory)
         for directory in LOCAL_GPO_DIRECTORIES
         if (backup_root / directory.name).is_dir()
+    ]
+
+    registry_backup_states: dict[str, Path] = {}
+
+    if registry_backup_root.exists():
+        for display_hive, root_path in POLICY_REGISTRY_ROOTS:
+            base_name = _registry_backup_name(
+                display_hive,
+                root_path,
+            )
+            exported = registry_backup_root / f"{base_name}.reg"
+            absent_marker = registry_backup_root / f"{base_name}.absent"
+
+            if exported.exists():
+                registry_backup_states[
+                    f"{display_hive}\\{root_path}"
+                ] = exported
+            elif absent_marker.exists():
+                registry_backup_states[
+                    f"{display_hive}\\{root_path}"
+                ] = absent_marker
+
+    expected_registry_roots = [
+        path
+        for path, backup_state in registry_backup_states.items()
+        if backup_state.suffix.lower() == ".reg"
     ]
 
     print()
@@ -1658,6 +2045,14 @@ def restore_backup(
             "Restoration will leave both stores absent."
         )
 
+    print()
+    print("Registry policy roots will be restored to the backup state.")
+    print(f"  Exported roots available: {len(expected_registry_roots)}")
+    print(
+        "  Older backups without Registry state markers may not contain "
+        "enough information for exact Registry restoration."
+    )
+
     if not confirm_yes_no("Continue with backup restoration?"):
         logger.info("Backup restoration cancelled.")
         return
@@ -1665,7 +2060,6 @@ def restore_backup(
     session = create_session()
     before = local_gpo_status()
 
-    # Protect the current state before changing it.
     if not create_backup(session, logger):
         print("\nSafety backup failed. Restoration was cancelled.")
         input("\nPress Enter to return to the main menu...")
@@ -1692,6 +2086,60 @@ def restore_backup(
             except OSError as exc:
                 restore_errors.append(f"{current}: {exc}")
 
+    for display_hive, root_path in POLICY_REGISTRY_ROOTS:
+        full_path = f"{display_hive}\\{root_path}"
+        backup_state = registry_backup_states.get(full_path)
+
+        if backup_state is None:
+            restore_errors.append(
+                f"{full_path}: Registry backup state is unavailable."
+            )
+            continue
+
+        if full_path in registry_policy_root_status():
+            success, reason = remove_registry_policy_root(
+                display_hive,
+                root_path,
+                logger,
+            )
+            if not success:
+                success, reason = force_remove_registry_policy_root(
+                    display_hive,
+                    root_path,
+                    logger,
+                )
+            if not success:
+                restore_errors.append(
+                    f"{full_path}: could not clear current Registry root: {reason}"
+                )
+                continue
+
+        if backup_state.suffix.lower() == ".reg":
+            if not command_exists("reg.exe"):
+                restore_errors.append(
+                    f"{full_path}: reg.exe was not found."
+                )
+                continue
+
+            code, stdout, stderr = run_command(
+                [
+                    "reg.exe",
+                    "import",
+                    str(backup_state),
+                ],
+                timeout=120,
+            )
+
+            if code == 0:
+                logger.info(
+                    f"Restored Registry policy root from backup: {full_path}"
+                )
+            else:
+                restore_errors.append(
+                    f"{full_path}: Registry import failed: "
+                    f"{stderr.strip() or stdout.strip() or f'reg import exit code {code}'}"
+                )
+
     after = local_gpo_status()
     expected_set = set(expected_present)
     actual_set = set(after["remaining_stores"])
@@ -1708,7 +2156,24 @@ def restore_backup(
                 "Unexpected stores remain: " + "; ".join(unexpected)
             )
 
-    restored_state_matches = not restore_errors and actual_set == expected_set
+    expected_registry_set = set(expected_registry_roots)
+    actual_registry_set = set(registry_policy_root_status())
+
+    if actual_registry_set != expected_registry_set:
+        missing = sorted(expected_registry_set - actual_registry_set)
+        unexpected = sorted(actual_registry_set - expected_registry_set)
+        if missing:
+            restore_errors.append(
+                "Expected Registry policy roots were not restored: "
+                + "; ".join(missing)
+            )
+        if unexpected:
+            restore_errors.append(
+                "Unexpected Registry policy roots remain: "
+                + "; ".join(unexpected)
+            )
+
+    restored_state_matches = not restore_errors
     gpupdate_ok = refresh_group_policy(session, logger)
     report = write_restore_report(
         session,
@@ -1735,7 +2200,11 @@ def restore_backup(
 
     print(
         "\nLocal Group Policy stores: "
-        f"{'Verified' if restored_state_matches else 'Not verified'}"
+        f"{'Verified' if set(after['remaining_stores']) == expected_set else 'Not verified'}"
+    )
+    print(
+        "Registry policy roots: "
+        f"{'Verified' if actual_registry_set == expected_registry_set else 'Not verified'}"
     )
     print(f"gpupdate /force: {'Successful' if gpupdate_ok else 'Failed'}")
     print(f"\nSafety backup created in: {session.directory}")
