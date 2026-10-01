@@ -2,6 +2,7 @@ from pathlib import Path
 import ast
 import base64
 import importlib.util
+from importlib.machinery import SourceFileLoader
 import os
 import subprocess
 import tempfile
@@ -121,9 +122,13 @@ class PolicyResetSourceTests(unittest.TestCase):
             self.skipTest("Windows-specific registry integration test.")
 
         module_path = APP
-        spec = importlib.util.spec_from_file_location(
+        loader = SourceFileLoader(
             "policyreset_runtime",
-            module_path,
+            str(module_path),
+        )
+        spec = importlib.util.spec_from_loader(
+            "policyreset_runtime",
+            loader,
         )
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
