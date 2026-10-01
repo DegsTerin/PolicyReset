@@ -1035,12 +1035,7 @@ catch {{
     $failureParts.Add($_.Exception.Message)
 
     if ($privilegeFailures.Count -gt 0) {{
-        $failureParts.Add(
-            (
-                "Privilege enablement warnings: "
-                + ($privilegeFailures -join '; ')
-            )
-        )
+        $failureParts.Add(("Privilege enablement warnings: " + ($privilegeFailures -join '; ')))
     }}
 
     foreach ($saved in ($backups | Sort-Object {{ $_.Path.Length }} -Descending)) {{
