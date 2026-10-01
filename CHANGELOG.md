@@ -1,3 +1,12 @@
+## 4.3.7 - 2026-10-01
+
+### Changed
+
+- Backup numbers now restore immediately when entered from option [3].
+- Individual backup deletion uses D followed by the backup number.
+- Delete-all remains available with A.
+- Removed the secondary action menu for a selected backup.
+
 ## 4.3.5 - 2026-10-01
 
 ### Changed
