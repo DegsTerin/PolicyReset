@@ -932,7 +932,7 @@ public static class PolicyResetNativeMethods
             }}
 
             int error = Marshal.GetLastWin32Error();
-            if (error != 0)
+            if (error == 1300)
             {{
                 throw new Win32Exception(
                     error,
@@ -1007,10 +1007,7 @@ try {{
             )
             $regExitCode = $LASTEXITCODE
 
-            if (
-                $regExitCode -eq 0
-                -and -not (Test-Path -LiteralPath $target)
-            ) {{
+            if ($regExitCode -eq 0 -and -not (Test-Path -LiteralPath $target)) {{
                 exit 0
             }}
 
