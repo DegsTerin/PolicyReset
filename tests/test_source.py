@@ -112,6 +112,8 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('"SeRestorePrivilege"', self.source)
         self.assertIn("def _build_registry_permission_repair_script(", self.source)
         self.assertIn("RegistryAccessRule", self.source)
+        self.assertIn("SecurityIdentifier", self.source)
+        self.assertIn("S-1-5-32-544", self.source)
         self.assertIn("SetOwner", self.source)
         self.assertNotIn("A;;GA;;;WD", self.source)
         self.assertNotIn("Everyone", self.source)
