@@ -20,7 +20,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.3.0"', self.source)
+        self.assertIn('VERSION = "4.3.1"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -98,6 +98,27 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('"registry_policy_roots_before": registry_roots_before', self.source)
         self.assertIn('"registry_policy_roots_after": registry_roots_after', self.source)
         self.assertIn("Registry policy roots are deleted recursively after backup.", self.source)
+
+    def test_registry_force_path_repairs_permissions_without_everyone_acl(self):
+        self.assertIn("def _enable_process_privileges(", self.source)
+        self.assertIn('"SeTakeOwnershipPrivilege"', self.source)
+        self.assertIn('"SeBackupPrivilege"', self.source)
+        self.assertIn('"SeRestorePrivilege"', self.source)
+        self.assertIn("def _build_registry_permission_repair_script(", self.source)
+        self.assertIn("RegistryAccessRule", self.source)
+        self.assertIn("SetOwner", self.source)
+        self.assertNotIn("A;;GA;;;WD", self.source)
+        self.assertNotIn("Everyone", self.source)
+
+    def test_registry_access_denied_is_not_treated_as_absent(self):
+        status = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "registry_policy_root_status"
+        )
+        status_text = ast.get_source_segment(self.source, status) or ""
+        self.assertIn('if exists or state != "Absent":', status_text)
 
     def test_registry_backup_records_absent_roots(self):
         self.assertIn('f"{base_name}.absent"', self.source)
