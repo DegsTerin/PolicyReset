@@ -29,4 +29,4 @@ Generated backups and reports may contain machine-specific information and must 
 
 ## Protected Registry removal
 
-The forced Registry path enables the Windows token privileges required for ownership and recovery operations, then uses the Windows Registry provider and .NET security descriptors for the fixed target only. It adds FullControl for the local Administrators group to the affected keys, performs the deletion, and attempts to restore saved security descriptors when deletion fails. It does not grant access to Everyone and it does not accept arbitrary Registry paths.
+The forced Registry path enables the required Windows token privileges inside the PowerShell process that performs the ACL repair. It then uses the Windows Registry provider and .NET security descriptors for the fixed target only. It adds FullControl for the local Administrators group to the affected keys. If PowerShell deletion fails after the permission repair, the same elevated process attempts a fixed-target reg.exe deletion before restoring saved security descriptors on a final failure. It does not grant access to Everyone and it does not accept arbitrary Registry paths.
