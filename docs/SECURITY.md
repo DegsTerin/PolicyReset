@@ -2,6 +2,8 @@
 
 PolicyReset is a privileged Windows administration utility.
 
+The current release is 4.3.2.
+
 It operates on fixed Local Group Policy stores and four fixed Registry policy roots:
 
 ```text
