@@ -418,6 +418,6 @@ Security-policy effects and other Group Policy Preference effects that are store
 
 ## Safety audit scope
 
-The 4.5.0 reset path is deliberately narrower than the original script. It does not recursively delete policy Registry roots, does not rewrite Registry ACLs, does not invoke `takeown.exe` or `icacls.exe`, and does not automatically delete Group Policy Preferences History. The latter is a documented local database used by Group Policy Preferences, and deleting it can change how future preference processing behaves. citeturn3search1turn3search8
+The 4.5.0 reset path is deliberately narrower than the original script. It does not recursively delete policy Registry roots, does not rewrite Registry ACLs, does not invoke `takeown.exe` or `icacls.exe`, and does not automatically delete Group Policy Preferences History. The latter is a documented local database used by Group Policy Preferences, and deleting it can change how future preference processing behaves. 
 
-Registry.pol parsing follows Microsoft's documented instruction format, including normal values, `**Del.<valuename>`, `**soft.<valuename>`, and `**DeleteValues`. `**DeleteKeys`, `**DelVals.` and `**SecureKey` instructions are not reversed automatically because doing so would require modifying keys or security descriptors beyond the safe value-removal scope. citeturn2search0turn3search12
+Registry.pol parsing follows Microsoft's documented instruction format, including normal values, `**Del.<valuename>`, `**soft.<valuename>`, and `**DeleteValues`. `**DeleteKeys`, `**DelVals.` and `**SecureKey` instructions are not reversed automatically because doing so would require modifying keys or security descriptors beyond the safe value-removal scope. 
