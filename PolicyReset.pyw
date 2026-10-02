@@ -32,6 +32,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import struct
 import sys
 import winreg
 import xml.etree.ElementTree as ET
@@ -455,6 +456,239 @@ def enumerate_registry_tree(
 
     walk(root_path)
     return entries
+
+
+
+def _read_registry_pol_string(
+    data: bytes,
+    offset: int,
+) -> tuple[str, int]:
+    """Read one UTF-16LE null-terminated Registry.pol string."""
+    end = data.find(b"\x00\x00", offset)
+    if end < 0 or (end - offset) % 2:
+        raise PolicyResetError(
+            "Invalid Registry.pol string terminator."
+        )
+
+    raw = data[offset:end]
+    try:
+        value = raw.decode("utf-16le")
+    except UnicodeDecodeError as exc:
+        raise PolicyResetError(
+            "Registry.pol contains invalid UTF-16LE text."
+        ) from exc
+
+    return value, end + 2
+
+
+def parse_registry_pol(
+    path: Path,
+    display_hive: str,
+) -> list[PolicyEntry]:
+    """Parse registry-based Local Group Policy instructions."""
+    data = path.read_bytes()
+
+    if len(data) < 8 or data[:4] != b"PReg":
+        raise PolicyResetError(
+            f"Invalid Registry.pol signature: {path}"
+        )
+
+    version = struct.unpack_from("<I", data, 4)[0]
+    if version < 1:
+        raise PolicyResetError(
+            f"Unsupported Registry.pol version {version}: {path}"
+        )
+
+    entries: list[PolicyEntry] = []
+    offset = 8
+
+    while offset < len(data):
+        if data[offset:offset + 2] != b"[\x00":
+            raise PolicyResetError(
+                f"Invalid Registry.pol instruction header at byte {offset}: {path}"
+            )
+        offset += 2
+
+        key_path, offset = _read_registry_pol_string(
+            data,
+            offset,
+        )
+        value_name, offset = _read_registry_pol_string(
+            data,
+            offset,
+        )
+
+        if offset + 8 > len(data):
+            raise PolicyResetError(
+                f"Truncated Registry.pol instruction: {path}"
+            )
+
+        _value_type = struct.unpack_from(
+            "<I",
+            data,
+            offset,
+        )[0]
+        offset += 4
+
+        data_size = struct.unpack_from(
+            "<I",
+            data,
+            offset,
+        )[0]
+        offset += 4
+
+        if data_size > len(data) - offset:
+            raise PolicyResetError(
+                f"Registry.pol data size exceeds file bounds: {path}"
+            )
+
+        instruction_data = data[
+            offset:offset + data_size
+        ]
+        offset += data_size
+
+        if data[offset:offset + 2] != b"]\x00":
+            raise PolicyResetError(
+                f"Invalid Registry.pol instruction terminator: {path}"
+            )
+        offset += 2
+
+        # Registry.pol has special instruction names that describe deletion,
+        # security or conditional behaviour rather than a normal Registry
+        # value. We can safely invert **Del.<name> and **soft.<name>.
+        lowered = value_name.lower()
+
+        if lowered.startswith("**del."):
+            target_name = value_name[6:]
+        elif lowered.startswith("**soft."):
+            target_name = value_name[7:]
+        elif lowered in {
+            "**delvals.",
+            "**deletevalues",
+            "**deletekeys",
+            "**securekey",
+        }:
+            continue
+        elif value_name.startswith("**"):
+            continue
+        else:
+            target_name = value_name
+
+        if not target_name:
+            continue
+
+        entries.append(
+            PolicyEntry(
+                hive=display_hive,
+                path=key_path,
+                value_name=target_name,
+                value="",
+            )
+        )
+
+        # Keep a reference to the instruction bytes in the parser loop so
+        # malformed records cannot be silently accepted as empty records.
+        _ = instruction_data
+
+    return entries
+
+
+def collect_local_registry_policy_entries(
+    logger: Logger,
+) -> tuple[list[PolicyEntry], list[str]]:
+    """Collect Registry values explicitly represented by local Registry.pol files."""
+    entries: list[PolicyEntry] = []
+    unsupported: list[str] = []
+
+    policy_files = (
+        (
+            "HKLM",
+            LOCAL_GPO_DIRECTORIES[0]
+            / "Machine"
+            / "Registry.pol",
+        ),
+        (
+            "HKCU",
+            LOCAL_GPO_DIRECTORIES[0]
+            / "User"
+            / "Registry.pol",
+        ),
+    )
+
+    for display_hive, path in policy_files:
+        if not path.exists():
+            continue
+
+        try:
+            parsed = parse_registry_pol(
+                path,
+                display_hive,
+            )
+        except (OSError, PolicyResetError) as exc:
+            logger.error(
+                f"Could not parse Local Group Policy Registry.pol {path}: {exc}"
+            )
+            unsupported.append(str(path))
+            continue
+
+        entries.extend(parsed)
+        logger.info(
+            f"Parsed {len(parsed)} registry policy instruction(s) from {path}."
+        )
+
+    unique: dict[tuple[str, str, str], PolicyEntry] = {}
+    for entry in entries:
+        unique[
+            (
+                entry.hive,
+                entry.path.casefold(),
+                entry.value_name.casefold(),
+            )
+        ] = entry
+
+    return list(unique.values()), unsupported
+
+
+def remove_local_registry_policy_entries(
+    entries: list[PolicyEntry],
+    logger: Logger,
+) -> tuple[list[str], list[RemovalFailure]]:
+    """Remove only Registry values explicitly represented by local Registry.pol."""
+    removed: list[str] = []
+    failures: list[RemovalFailure] = []
+
+    for entry in entries:
+        full_path = entry.full_path
+        try:
+            with winreg.OpenKey(
+                _registry_hive(entry.hive),
+                entry.path,
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                try:
+                    winreg.DeleteValue(
+                        key,
+                        entry.value_name,
+                    )
+                except FileNotFoundError:
+                    continue
+
+            removed.append(full_path)
+            logger.info(
+                f"Removed Local Group Policy Registry value: {full_path}"
+            )
+        except FileNotFoundError:
+            continue
+        except (PermissionError, OSError) as exc:
+            failures.append(
+                RemovalFailure(
+                    path=full_path,
+                    reason=str(exc),
+                )
+            )
+
+    return removed, failures
 
 
 def scan_policy_registry(
@@ -1918,6 +2152,8 @@ def write_reset_report(
     registry_roots_before: list[str],
     registry_roots_after: list[str],
     registry_cleanup_skipped: bool,
+    local_registry_policy_entry_count: int,
+    unsupported_registry_policy_files: list[str],
 ) -> Path:
     data = {
         "application": APP_NAME,
@@ -1949,6 +2185,8 @@ def write_reset_report(
         ],
         "registry_policy_roots_after": registry_roots_after,
         "registry_cleanup_skipped": registry_cleanup_skipped,
+        "local_registry_policy_entry_count": local_registry_policy_entry_count,
+        "unsupported_registry_policy_files": unsupported_registry_policy_files,
         "gpupdate_succeeded": gpupdate_ok,
         "gpupdate_scope": (
             "not_run_during_reset"
@@ -1959,7 +2197,6 @@ def write_reset_report(
             not still_failed
             and not after["remaining_stores"]
             and not registry_still_failed
-            and (registry_cleanup_skipped or not registry_roots_after)
         ),
         "management": asdict(management),
         "applied_group_policy_objects_reported": applied_objects,
@@ -2308,7 +2545,7 @@ def remove_all_local_group_policy(
     session: Session,
     logger: Logger,
 ) -> None:
-    """Remove Local Group Policy stores without touching remote policy sources."""
+    """Remove Local Group Policy stores and their local Registry.pol results."""
     print()
     print("=" * 78)
     print("REMOVE LOCAL GROUP POLICY")
@@ -2320,8 +2557,8 @@ def remove_all_local_group_policy(
     print()
     print("A complete backup is created before any modification.")
     print(
-        "Registry policy results are cleared only when the computer is "
-        "not detected as organisation-managed."
+        "Registry values are removed only when they are explicitly represented "
+        "by the local Registry.pol files."
     )
     print(
         "Active Directory, Microsoft Entra ID and MDM policy are never "
@@ -2341,9 +2578,9 @@ def remove_all_local_group_policy(
             "Organisation-level management indicators were detected."
         )
         print(
-            "The Local Group Policy stores can still be removed, but the "
-            "Registry policy-result cleanup will be skipped because the "
-            "remaining Registry state may belong to remote policy."
+            "The Local Group Policy stores can still be removed, but Registry "
+            "policy-result cleanup will be skipped because the remaining "
+            "Registry state may belong to remote policy."
         )
         print(
             "A remote GPO or MDM policy can be reapplied by Windows."
@@ -2361,6 +2598,16 @@ def remove_all_local_group_policy(
     before = local_gpo_status()
     registry_before = scan_policy_registry(logger)
     registry_roots_before = registry_policy_root_status()
+
+    # Parse the local policy source before deleting it.
+    local_policy_entries: list[PolicyEntry] = []
+    unsupported_registry_policy_files: list[str] = []
+
+    if not management.organisation_managed_indicator:
+        (
+            local_policy_entries,
+            unsupported_registry_policy_files,
+        ) = collect_local_registry_policy_entries(logger)
 
     if not create_backup(session, logger):
         print()
@@ -2401,6 +2648,7 @@ def remove_all_local_group_policy(
     registry_failures: list[RemovalFailure] = []
     registry_forced_removed: list[str] = []
     registry_still_failed: list[RemovalFailure] = []
+
     registry_cleanup_skipped = management.organisation_managed_indicator
 
     if registry_cleanup_skipped:
@@ -2408,28 +2656,27 @@ def remove_all_local_group_policy(
             "Registry policy-result cleanup was skipped because organisation-level "
             "management indicators were detected."
         )
-    else:
-        for display_hive, root_path in POLICY_REGISTRY_ROOTS:
-            full_path = f"{display_hive}\\{root_path}"
-            success, reason = remove_registry_policy_root(
-                display_hive,
-                root_path,
-                logger,
+    elif unsupported_registry_policy_files:
+        logger.error(
+            "Registry policy cleanup was not attempted because one or more "
+            "local Registry.pol files could not be parsed."
+        )
+        registry_failures.extend(
+            RemovalFailure(
+                path=path,
+                reason="Registry.pol could not be parsed safely.",
             )
-
-            if success and reason == "Already absent":
-                registry_already_absent.append(full_path)
-            elif success:
-                registry_removed.append(full_path)
-            else:
-                registry_failures.append(
-                    RemovalFailure(
-                        path=full_path,
-                        reason=reason,
-                    )
-                )
-
-        # A failure is reported rather than forcing ACL changes.
+            for path in unsupported_registry_policy_files
+        )
+        registry_still_failed = list(registry_failures)
+    else:
+        (
+            registry_removed,
+            registry_failures,
+        ) = remove_local_registry_policy_entries(
+            local_policy_entries,
+            logger,
+        )
         registry_still_failed = list(registry_failures)
 
     print()
@@ -2461,6 +2708,8 @@ def remove_all_local_group_policy(
         registry_roots_before,
         registry_roots_after,
         registry_cleanup_skipped,
+        len(local_policy_entries),
+        unsupported_registry_policy_files,
     )
 
     show_removal_result(
