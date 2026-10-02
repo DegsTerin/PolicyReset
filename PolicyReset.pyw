@@ -14,8 +14,8 @@ Scope:
     - Backup before modification.
     - Verification after modification.
     - Group Policy refresh as a separate explicit operation.
-    - Optional forced removal only for local Group Policy stores that failed
-      normal removal.
+    - No forced removal or Registry ACL rewriting is used by the reset
+      operation.
 
 PolicyReset does not remove or bypass Active Directory, Microsoft Entra ID,
 MDM, Intune or other remote organisation-controlled policy.
@@ -40,7 +40,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.3.9"
+VERSION = "4.4.0"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -1917,6 +1917,7 @@ def write_reset_report(
     registry_still_failed: list[RemovalFailure],
     registry_roots_before: list[str],
     registry_roots_after: list[str],
+    registry_cleanup_skipped: bool,
 ) -> Path:
     data = {
         "application": APP_NAME,
@@ -1947,6 +1948,7 @@ def write_reset_report(
             for item in registry_still_failed
         ],
         "registry_policy_roots_after": registry_roots_after,
+        "registry_cleanup_skipped": registry_cleanup_skipped,
         "gpupdate_succeeded": gpupdate_ok,
         "gpupdate_scope": (
             "not_run_during_reset"
@@ -1957,7 +1959,7 @@ def write_reset_report(
             not still_failed
             and not after["remaining_stores"]
             and not registry_still_failed
-            and not registry_roots_after
+            and (registry_cleanup_skipped or not registry_roots_after)
         ),
         "management": asdict(management),
         "applied_group_policy_objects_reported": applied_objects,
@@ -2306,38 +2308,29 @@ def remove_all_local_group_policy(
     session: Session,
     logger: Logger,
 ) -> None:
+    """Remove Local Group Policy stores without touching remote policy sources."""
     print()
     print("=" * 78)
     print("REMOVE LOCAL GROUP POLICY")
     print("=" * 78)
     print()
+    print("This operation removes the local Group Policy stores for:")
+    print("  - Computer")
+    print("  - User")
+    print()
+    print("A complete backup is created before any modification.")
     print(
-        "This removes Local Group Policy and its targeted Registry policy roots for:"
+        "Registry policy results are cleared only when the computer is "
+        "not detected as organisation-managed."
     )
     print(
-        "  - Computer"
-    )
-    print(
-        "  - User"
+        "Active Directory, Microsoft Entra ID and MDM policy are never "
+        "modified by this operation."
     )
     print()
     print(
-        "A backup will be created before any removal."
-    )
-    print(
-        "The Registry cleanup targets the same four policy roots used by "
-        "the original PolicyReset script."
-    )
-    print(
-        "Remote Active Directory, Microsoft Entra ID and MDM "
-        "policy are outside the scope of this operation."
-    )
-    print()
-    print(
-        "WARNING: Registry policy roots are deleted recursively after backup."
-    )
-    print(
-        "Existing values under these four roots may be removed."
+        "Local Security Policy, Windows services, firewall rules, scheduled "
+        "tasks and other system configuration are not reset by this operation."
     )
     print()
 
@@ -2345,44 +2338,34 @@ def remove_all_local_group_policy(
 
     if management.organisation_managed_indicator:
         print(
-            "Warning: organisation-level management indicators "
-            "were detected."
+            "Organisation-level management indicators were detected."
         )
         print(
-            "Local removal may succeed while remote policy "
-            "is later reapplied."
+            "The Local Group Policy stores can still be removed, but the "
+            "Registry policy-result cleanup will be skipped because the "
+            "remaining Registry state may belong to remote policy."
+        )
+        print(
+            "A remote GPO or MDM policy can be reapplied by Windows."
         )
         print()
 
     if not confirm_yes_no(
         "Continue with Local Group Policy removal and backup?"
     ):
-        logger.info(
-            "Local Group Policy removal cancelled."
-        )
-        print(
-            "\nOperation cancelled."
-        )
-        input(
-            "\nPress Enter to return to the main menu..."
-        )
+        logger.info("Local Group Policy removal cancelled.")
+        print("\nOperation cancelled.")
+        input("\nPress Enter to return to the main menu...")
         return
 
     before = local_gpo_status()
     registry_before = scan_policy_registry(logger)
     registry_roots_before = registry_policy_root_status()
 
-    if not create_backup(
-        session,
-        logger,
-    ):
+    if not create_backup(session, logger):
         print()
-        print(
-            "Backup failed. No Group Policy removal was performed."
-        )
-        input(
-            "\nPress Enter to return to the main menu..."
-        )
+        print("Backup failed. No Group Policy removal was performed.")
+        input("\nPress Enter to return to the main menu...")
         return
 
     removed: list[str] = []
@@ -2409,104 +2392,48 @@ def remove_all_local_group_policy(
                 )
             )
 
+    # Never rewrite Registry ACLs or use forced deletion in the reset flow.
     forced_removed: list[str] = []
-    still_failed: list[RemovalFailure] = []
-
-    if failures:
-        print()
-        print(
-            f"{len(failures)} local Group Policy store(s) "
-            "could not be removed normally."
-        )
-
-        if confirm_yes_no(
-            "Force removal of the failed local Group Policy stores?"
-        ):
-            for failure in failures:
-                success, reason = (
-                    force_remove_directory(
-                        Path(failure.path),
-                        logger,
-                    )
-                )
-
-                if success:
-                    forced_removed.append(
-                        failure.path
-                    )
-                else:
-                    still_failed.append(
-                        RemovalFailure(
-                            path=failure.path,
-                            reason=reason,
-                        )
-                    )
-        else:
-            still_failed = failures
+    still_failed = list(failures)
 
     registry_removed: list[str] = []
     registry_already_absent: list[str] = []
     registry_failures: list[RemovalFailure] = []
-
-    for display_hive, root_path in POLICY_REGISTRY_ROOTS:
-        full_path = f"{display_hive}\\{root_path}"
-        success, reason = remove_registry_policy_root(
-            display_hive,
-            root_path,
-            logger,
-        )
-
-        if success and reason == "Already absent":
-            registry_already_absent.append(full_path)
-        elif success:
-            registry_removed.append(full_path)
-        else:
-            registry_failures.append(
-                RemovalFailure(
-                    path=full_path,
-                    reason=reason,
-                )
-            )
-
     registry_forced_removed: list[str] = []
     registry_still_failed: list[RemovalFailure] = []
+    registry_cleanup_skipped = management.organisation_managed_indicator
 
-    if registry_failures:
-        print()
-        print(
-            f"{len(registry_failures)} Registry policy root(s) "
-            "could not be removed normally."
+    if registry_cleanup_skipped:
+        logger.warn(
+            "Registry policy-result cleanup was skipped because organisation-level "
+            "management indicators were detected."
         )
+    else:
+        for display_hive, root_path in POLICY_REGISTRY_ROOTS:
+            full_path = f"{display_hive}\\{root_path}"
+            success, reason = remove_registry_policy_root(
+                display_hive,
+                root_path,
+                logger,
+            )
 
-        if confirm_yes_no(
-            "Force removal of the failed Registry policy roots?"
-        ):
-            for failure in registry_failures:
-                hive, root_path = failure.path.split("\\", 1)
-                success, reason = force_remove_registry_policy_root(
-                    hive,
-                    root_path,
-                    logger,
+            if success and reason == "Already absent":
+                registry_already_absent.append(full_path)
+            elif success:
+                registry_removed.append(full_path)
+            else:
+                registry_failures.append(
+                    RemovalFailure(
+                        path=full_path,
+                        reason=reason,
+                    )
                 )
 
-                if success:
-                    registry_forced_removed.append(
-                        failure.path
-                    )
-                else:
-                    registry_still_failed.append(
-                        RemovalFailure(
-                            path=failure.path,
-                            reason=reason,
-                        )
-                    )
-        else:
-            registry_still_failed = registry_failures
+        # A failure is reported rather than forcing ACL changes.
+        registry_still_failed = list(registry_failures)
 
     print()
-    print(
-        "Verifying Local Group Policy and Registry policy roots..."
-    )
+    print("Verifying Local Group Policy and Registry policy state...")
 
     after = local_gpo_status()
     registry_after = scan_policy_registry(logger)
@@ -2533,6 +2460,7 @@ def remove_all_local_group_policy(
         registry_still_failed,
         registry_roots_before,
         registry_roots_after,
+        registry_cleanup_skipped,
     )
 
     show_removal_result(
@@ -2557,10 +2485,7 @@ def remove_all_local_group_policy(
         registry_roots_after,
     )
 
-    input(
-        "\nPress Enter to return to the main menu..."
-    )
-
+    input("\nPress Enter to return to the main menu...")
 
 def write_json_report(
     session: Session,
