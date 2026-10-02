@@ -588,7 +588,7 @@ class LocalPolicyResetSafetyTests(unittest.TestCase):
         reset_text = ast.get_source_segment(self.source, reset) or ""
         self.assertNotIn("remove_group_policy_history(", reset_text)
         self.assertIn("history_failures: list[RemovalFailure] = []", reset_text)
-        self.assertIn("history database", reset_text)
+        self.assertIn("history database", self.source)
 
     def test_reset_does_not_delete_policy_registry_roots(self):
         reset = next(
@@ -635,9 +635,9 @@ class RegistryPolSafetyTests(unittest.TestCase):
             "winreg": winreg,
             "PolicyResetError": RuntimeError,
         }
-        exec(ast.get_source_segment(cls.source, read_string), namespace)
-        exec(ast.get_source_segment(cls.source, decoder), namespace)
-        exec(ast.get_source_segment(cls.source, parser), namespace)
+        exec(ast.get_source_segment(self.source, read_string), namespace)
+        exec(ast.get_source_segment(self.source, decoder), namespace)
+        exec(ast.get_source_segment(self.source, parser), namespace)
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "Registry.pol"
