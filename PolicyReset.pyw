@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.3.9
+PolicyReset 4.4.0
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
