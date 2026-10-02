@@ -1977,7 +1977,10 @@ def create_backup(
             "Local Group Policy backup did not complete."
         )
 
-    if not registry_backup_ok or not gpo_backup_ok:
+    if not registry_backup_ok or not gpo_backup_ok or not history_backup_ok:
+        logger.error(
+            "Group Policy Preferences History backup did not complete."
+        )
         return False
 
     logger.info(
@@ -2299,6 +2302,7 @@ def write_reset_report(
             not still_failed
             and not after["remaining_stores"]
             and not registry_still_failed
+            and not group_policy_history_failures
         ),
         "management": asdict(management),
         "applied_group_policy_objects_reported": applied_objects,
@@ -2502,11 +2506,13 @@ def show_removal_result(
         and not remaining_stores
         and not registry_still_failed
         and not registry_roots_after
+        and not group_policy_history_failures
     )
 
     if (
         before_count == 0
         and registry_before_count == 0
+        and not group_policy_history_removed
         and operation_success
     ):
         print("No targeted Local Group Policy data was present before the operation.")
@@ -2720,11 +2726,10 @@ def remove_all_local_group_policy(
     local_policy_entries: list[PolicyEntry] = []
     unsupported_registry_policy_files: list[str] = []
 
-    if not management.organisation_managed_indicator:
-        (
-            local_policy_entries,
-            unsupported_registry_policy_files,
-        ) = collect_local_registry_policy_entries(logger)
+    (
+        local_policy_entries,
+        unsupported_registry_policy_files,
+    ) = collect_local_registry_policy_entries(logger)
 
     if not create_backup(session, logger):
         print()
@@ -2825,9 +2830,9 @@ def remove_all_local_group_policy(
         registry_roots_after,
         registry_cleanup_skipped,
         len(local_policy_entries),
-        unsupported_registry_policy_files,
         history_removed,
         history_failures,
+        unsupported_registry_policy_files,
     )
 
     show_removal_result(
