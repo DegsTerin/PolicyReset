@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PolicyReset 4.4.0
+PolicyReset 4.5.0
 
 Windows Local Group Policy diagnostic, backup, reset and verification utility.
 
@@ -2253,6 +2253,7 @@ def write_reset_report(
     local_registry_policy_entry_count: int,
     group_policy_history_removed: list[str],
     group_policy_history_failures: list[RemovalFailure],
+    targeted_registry_values_remaining: list[str],
     unsupported_registry_policy_files: list[str],
 ) -> Path:
     data = {
@@ -2292,6 +2293,7 @@ def write_reset_report(
             asdict(item)
             for item in group_policy_history_failures
         ],
+        "targeted_registry_values_remaining": targeted_registry_values_remaining,
         "gpupdate_succeeded": gpupdate_ok,
         "gpupdate_scope": (
             "not_run_during_reset"
@@ -2303,6 +2305,7 @@ def write_reset_report(
             and not after["remaining_stores"]
             and not registry_still_failed
             and not group_policy_history_failures
+            and not targeted_registry_values_remaining
         ),
         "management": asdict(management),
         "applied_group_policy_objects_reported": applied_objects,
@@ -2324,6 +2327,8 @@ def write_reset_report(
             and not still_failed
             and not after["remaining_stores"]
             and not registry_still_failed
+            and not group_policy_history_failures
+            and not targeted_registry_values_remaining
         ),
     }
 
@@ -2365,6 +2370,7 @@ def show_removal_result(
     registry_cleanup_skipped: bool,
     group_policy_history_removed: list[str],
     group_policy_history_failures: list[RemovalFailure],
+    targeted_registry_values_remaining: list[str],
 ) -> None:
     print()
     print("=" * 78)
@@ -2374,6 +2380,7 @@ def show_removal_result(
         and not remaining_stores
         and not registry_still_failed
         and not group_policy_history_failures
+        and not targeted_registry_values_remaining
     )
 
     if before_count == 0 and registry_before_count == 0 and operation_clear:
@@ -2468,12 +2475,17 @@ def show_removal_result(
             "  [OK] Both local Group Policy stores are absent."
         )
 
-    if registry_roots_after:
-        for path in registry_roots_after:
-            print(f"  [FAIL] Registry policy data remains at: {path}")
+    if targeted_registry_values_remaining:
+        for path in targeted_registry_values_remaining:
+            print(f"  [FAIL] Local Registry.pol value remains: {path}")
     else:
         print(
-            "  [OK] All targeted Registry policy locations are clear of policy data."
+            "  [OK] Registry values represented by the local Registry.pol files are clear."
+        )
+    if registry_roots_after:
+        print(
+            f"  Note: {len(registry_roots_after)} policy Registry root(s) still contain "
+            "data that was not identified as a local Registry.pol result."
         )
 
     if applied_objects:
@@ -2807,6 +2819,19 @@ def remove_all_local_group_policy(
     registry_after = scan_policy_registry(logger)
     registry_roots_after = registry_policy_root_status()
 
+    targeted_paths = {
+        entry.full_path.casefold()
+        for entry in local_policy_entries
+    }
+    remaining_after_paths = {
+        entry.full_path.casefold(): entry.full_path
+        for entry in registry_after
+    }
+    targeted_registry_values_remaining = [
+        remaining_after_paths[path]
+        for path in sorted(targeted_paths & remaining_after_paths.keys())
+    ]
+
     report = write_reset_report(
         session,
         before,
@@ -2832,6 +2857,7 @@ def remove_all_local_group_policy(
         len(local_policy_entries),
         history_removed,
         history_failures,
+        targeted_registry_values_remaining,
         unsupported_registry_policy_files,
     )
 
@@ -2858,6 +2884,7 @@ def remove_all_local_group_policy(
         registry_cleanup_skipped,
         history_removed,
         history_failures,
+        targeted_registry_values_remaining,
     )
 
     input("\nPress Enter to return to the main menu...")
