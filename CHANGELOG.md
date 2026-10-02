@@ -1,3 +1,19 @@
+# Changelog
+
+## 4.5.0 - 2026-10-02
+
+### Changed
+- Hardened the Local Group Policy reset flow so local Registry.pol results are cleaned even when domain, Entra ID or MDM management indicators are detected.
+- Added backup and controlled cleanup of the documented Local Group Policy Preferences history stores.
+- Kept Active Directory, Microsoft Entra ID and MDM policy outside the reset scope.
+- Kept the reset operation free of forced Registry ACL rewriting, ownership changes and recursive permission repair.
+- Extended reset verification to include Group Policy Preferences history cleanup.
+- Updated the project version to 4.5.0.
+
+### Safety
+- The reset still does not disable Windows services, alter firewall rules, delete accounts, modify scheduled tasks or remove arbitrary Registry policy roots.
+- Remote organisation policy may be reapplied after the local reset.
+
 ## 4.3.8 - 2026-10-01
 
 ### Changed
