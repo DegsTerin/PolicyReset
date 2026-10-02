@@ -4,14 +4,18 @@
 
 ### Changed
 - Hardened the Local Group Policy reset flow so local Registry.pol results are cleaned even when domain, Entra ID or MDM management indicators are detected.
-- Added backup and controlled cleanup of the documented Local Group Policy Preferences history stores.
+- Added backup of the documented Local Group Policy Preferences history stores, while deliberately preserving those stores during reset.
 - Kept Active Directory, Microsoft Entra ID and MDM policy outside the reset scope.
-- Kept the reset operation free of forced Registry ACL rewriting, ownership changes and recursive permission repair.
-- Extended reset verification to include Group Policy Preferences history cleanup.
+- Removed Registry ACL repair and ownership-changing operations from the reset and restore paths.
+- Changed Registry restore to use non-destructive `reg.exe import` without deleting current Registry policy roots.
+- Extended reset verification so unrelated values remaining under broad policy Registry roots do not falsely mark the targeted Local Registry.pol cleanup as failed.
+- Improved Registry.pol parsing for UTF-16LE strings and the documented `**DeleteValues` instruction.
 - Updated the project version to 4.5.0.
 
 ### Safety
-- The reset still does not disable Windows services, alter firewall rules, delete accounts, modify scheduled tasks or remove arbitrary Registry policy roots.
+- The reset does not recursively delete `HKLM\\SOFTWARE\\Policies`, `HKCU\\Software\\Policies` or the corresponding `CurrentVersion\\Policies` roots.
+- The reset does not invoke `takeown.exe`, `icacls.exe` or forced Registry permission repair.
+- The reset does not delete Group Policy Preferences History automatically because that local database can affect later preference processing.
 - Remote organisation policy may be reapplied after the local reset.
 
 ## 4.3.8 - 2026-10-01
