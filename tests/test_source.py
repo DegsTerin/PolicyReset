@@ -514,7 +514,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_reset_report_has_operation_status(self):
         self.assertIn('"operation_succeeded": (', self.source)
-        self.assertIn('and not registry_roots_after', self.source)
+        self.assertIn('and not registry_still_failed', self.source)
 
     def test_refresh_report_records_output_file(self):
         self.assertIn('"output_file": str(session.directory / "gpupdate.txt")', self.source)
