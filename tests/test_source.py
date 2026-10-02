@@ -447,17 +447,29 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertNotIn("Refreshing User and Computer Group Policy", reset_text)
         self.assertIn("Verifying Local Group Policy and Registry policy state", reset_text)
 
-    def test_success_result_does_not_depend_on_gpupdate(self):
+    def test_success_result_does_not_depend_on_gpupdate_or_unrelated_registry_values(self):
         self.assertIn('not remaining_stores', self.source)
-        self.assertNotIn('and gpupdate_ok\n    ):\n        print("GROUP POLICIES REMOVED SUCCESSFULLY")', self.source)
+        self.assertIn('not targeted_registry_values_remaining', self.source)
+        self.assertNotIn('and registry_roots_after', self.source)
 
     def test_reset_report_records_force_results(self):
         self.assertIn('"forced_removals": forced_removed', self.source)
         self.assertIn('"remaining_failures": [', self.source)
+        self.assertIn('"registry_cleanup_skipped": registry_cleanup_skipped', self.source)
 
-    def test_restore_does_not_merge_backup(self):
+    def test_restore_replaces_only_local_gpo_directories_and_does_not_delete_registry_roots(self):
         self.assertIn("remove_directory_normal(current, logger)", self.source)
         self.assertIn("shutil.copytree(backup, current)", self.source)
+        restore = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "restore_backup"
+        )
+        restore_text = ast.get_source_segment(self.source, restore) or ""
+        self.assertIn('"reg.exe",\n                "import"', restore_text)
+        self.assertNotIn("remove_registry_policy_root(", restore_text)
+        self.assertNotIn("force_remove_registry_policy_root(", restore_text)
 
 
 
@@ -565,7 +577,7 @@ class LocalPolicyResetSafetyTests(unittest.TestCase):
         self.assertNotIn("refresh_group_policy(", reset_text)
         self.assertNotIn("gpupdate.exe", reset_text)
 
-    def test_reset_cleans_documented_group_policy_history(self):
+    def test_reset_preserves_group_policy_history(self):
         reset = next(
             node
             for node in ast.walk(self.tree)
@@ -573,8 +585,9 @@ class LocalPolicyResetSafetyTests(unittest.TestCase):
             and node.name == "remove_all_local_group_policy"
         )
         reset_text = ast.get_source_segment(self.source, reset) or ""
-        self.assertIn("remove_group_policy_history(", reset_text)
-        self.assertIn("history_failures", reset_text)
+        self.assertNotIn("remove_group_policy_history(", reset_text)
+        self.assertIn("history_failures: list[RemovalFailure] = []", reset_text)
+        self.assertIn("history database", reset_text)
 
     def test_reset_does_not_delete_policy_registry_roots(self):
         reset = next(
@@ -587,3 +600,94 @@ class LocalPolicyResetSafetyTests(unittest.TestCase):
         self.assertNotIn("remove_registry_policy_root(", reset_text)
         self.assertNotIn("force_remove_registry_policy_root(", reset_text)
         self.assertIn("remove_local_registry_policy_entries(", reset_text)
+
+
+class RegistryPolSafetyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = APP.read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.source)
+
+    def test_registry_pol_delete_values_is_supported(self):
+        parser = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "parse_registry_pol"
+        )
+        decoder = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_decode_registry_pol_data"
+        )
+        read_string = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_read_registry_pol_string"
+        )
+        namespace = {
+            "__builtins__": __builtins__,
+            "Path": Path,
+            "struct": struct,
+            "winreg": winreg,
+            "PolicyResetError": RuntimeError,
+        }
+        exec(ast.get_source_segment(cls.source, read_string), namespace)
+        exec(ast.get_source_segment(cls.source, decoder), namespace)
+        exec(ast.get_source_segment(cls.source, parser), namespace)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Registry.pol"
+
+            def encoded(value):
+                return value.encode("utf-16le") + b"\\x00\\x00"
+
+            body = (
+                b"[\\x00"
+                + encoded(r"Software\\Policies\\Example")
+                + encoded("**DeleteValues")
+                + struct.pack("<I", winreg.REG_SZ)
+                + struct.pack("<I", len(encoded("Alpha;Beta")))
+                + encoded("Alpha;Beta")
+                + b"]\\x00"
+            )
+            path.write_bytes(
+                b"PReg" + struct.pack("<I", 1) + body
+            )
+
+            entries = namespace["parse_registry_pol"](path, "HKCU")
+
+        self.assertEqual(
+            {
+                ("HKCU", r"Software\Policies\Example", "Alpha"),
+                ("HKCU", r"Software\Policies\Example", "Beta"),
+            },
+            {
+                (entry.hive, entry.path, entry.value_name)
+                for entry in entries
+            },
+        )
+
+    def test_reset_and_restore_have_no_registry_acl_repair_path(self):
+        reset = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "remove_all_local_group_policy"
+        )
+        restore = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "restore_backup"
+        )
+        for function in (reset, restore):
+            text = ast.get_source_segment(self.source, function) or ""
+            self.assertNotIn("takeown.exe", text)
+            self.assertNotIn("icacls.exe", text)
+            self.assertNotIn("_enable_process_privileges(", text)
+            self.assertNotIn("force_remove_registry_policy_root(", text)
+
+    def test_group_policy_history_is_documented_as_preserved(self):
+        self.assertIn("history database", self.source)
+        self.assertIn("Automatic cleanup: Not performed", self.source)
