@@ -5,6 +5,7 @@ import base64
 import shutil
 import os
 import subprocess
+import struct
 import tempfile
 import unittest
 import uuid
