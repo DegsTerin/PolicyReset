@@ -477,22 +477,30 @@ def _read_registry_pol_string(
     offset: int,
 ) -> tuple[str, int]:
     """Read one UTF-16LE null-terminated Registry.pol string."""
-    end = data.find(b"\x00\x00", offset)
-    if end < 0 or (end - offset) % 2:
-        raise PolicyResetError(
-            "Invalid Registry.pol string terminator."
-        )
+    end = offset
 
-    raw = data[offset:end]
-    try:
-        value = raw.decode("utf-16le")
-    except UnicodeDecodeError as exc:
-        raise PolicyResetError(
-            "Registry.pol contains invalid UTF-16LE text."
-        ) from exc
+    while end + 2 <= len(data):
+        if data[end:end + 2] == b"\x00\x00":
+            raw = data[offset:end]
+            if len(raw) % 2:
+                raise PolicyResetError(
+                    "Registry.pol string has an invalid UTF-16LE byte length."
+                )
 
-    return value, end + 2
+            try:
+                value = raw.decode("utf-16le")
+            except UnicodeDecodeError as exc:
+                raise PolicyResetError(
+                    "Registry.pol contains invalid UTF-16LE text."
+                ) from exc
 
+            return value, end + 2
+
+        end += 2
+
+    raise PolicyResetError(
+        "Invalid Registry.pol string terminator."
+    )
 
 def _decode_registry_pol_data(
     data: bytes,
