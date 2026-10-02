@@ -634,6 +634,18 @@ class RegistryPolSafetyTests(unittest.TestCase):
             "struct": struct,
             "winreg": winreg,
             "PolicyResetError": RuntimeError,
+            "PolicyEntry": type(
+                "PolicyEntry",
+                (),
+                {
+                    "__init__": lambda self, hive, path, value_name, value: (
+                        setattr(self, "hive", hive),
+                        setattr(self, "path", path),
+                        setattr(self, "value_name", value_name),
+                        setattr(self, "value", value),
+                    )[-1],
+                },
+            ),
         }
         exec(ast.get_source_segment(self.source, read_string), namespace)
         exec(ast.get_source_segment(self.source, decoder), namespace)
