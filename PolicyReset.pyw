@@ -16,6 +16,7 @@ Scope:
     - Group Policy refresh as a separate explicit operation.
     - No forced removal or Registry ACL rewriting is used by the reset
       operation.
+    - Group Policy Preferences History is preserved during reset.
 
 PolicyReset does not remove or bypass Active Directory, Microsoft Entra ID,
 MDM, Intune or other remote organisation-controlled policy.
@@ -493,11 +494,34 @@ def _read_registry_pol_string(
     return value, end + 2
 
 
+def _decode_registry_pol_data(
+    data: bytes,
+    value_type: int,
+) -> str:
+    """Decode Registry.pol string data used by special deletion instructions."""
+    if value_type == winreg.REG_SZ:
+        raw = data
+        if len(raw) % 2:
+            raise PolicyResetError(
+                "Registry.pol string data has an invalid byte length."
+            )
+        try:
+            return raw.decode("utf-16le").rstrip("\x00")
+        except UnicodeDecodeError as exc:
+            raise PolicyResetError(
+                "Registry.pol contains invalid UTF-16LE instruction data."
+            ) from exc
+
+    raise PolicyResetError(
+        "Unsupported Registry.pol data type for a special instruction."
+    )
+
+
 def parse_registry_pol(
     path: Path,
     display_hive: str,
 ) -> list[PolicyEntry]:
-    """Parse registry-based Local Group Policy instructions."""
+    """Parse Registry.pol values that can be safely removed after local GPO reset."""
     data = path.read_bytes()
 
     if len(data) < 8 or data[:4] != b"PReg":
@@ -521,32 +545,17 @@ def parse_registry_pol(
             )
         offset += 2
 
-        key_path, offset = _read_registry_pol_string(
-            data,
-            offset,
-        )
-        value_name, offset = _read_registry_pol_string(
-            data,
-            offset,
-        )
+        key_path, offset = _read_registry_pol_string(data, offset)
+        value_name, offset = _read_registry_pol_string(data, offset)
 
         if offset + 8 > len(data):
             raise PolicyResetError(
                 f"Truncated Registry.pol instruction: {path}"
             )
 
-        _value_type = struct.unpack_from(
-            "<I",
-            data,
-            offset,
-        )[0]
+        value_type = struct.unpack_from("<I", data, offset)[0]
         offset += 4
-
-        data_size = struct.unpack_from(
-            "<I",
-            data,
-            offset,
-        )[0]
+        data_size = struct.unpack_from("<I", data, offset)[0]
         offset += 4
 
         if data_size > len(data) - offset:
@@ -554,9 +563,7 @@ def parse_registry_pol(
                 f"Registry.pol data size exceeds file bounds: {path}"
             )
 
-        instruction_data = data[
-            offset:offset + data_size
-        ]
+        instruction_data = data[offset:offset + data_size]
         offset += data_size
 
         if data[offset:offset + 2] != b"]\x00":
@@ -565,45 +572,47 @@ def parse_registry_pol(
             )
         offset += 2
 
-        # Registry.pol has special instruction names that describe deletion,
-        # security or conditional behaviour rather than a normal Registry
-        # value. We can safely invert **Del.<name> and **soft.<name>.
-        lowered = value_name.lower()
+        lowered = value_name.casefold()
 
         if lowered.startswith("**del."):
-            target_name = value_name[6:]
+            target_names = [value_name[6:]]
         elif lowered.startswith("**soft."):
-            target_name = value_name[7:]
-        elif lowered in {
-            "**delvals.",
-            "**deletevalues",
-            "**deletekeys",
-            "**securekey",
-        }:
+            target_names = [value_name[7:]]
+        elif lowered == "**deletevalues":
+            instruction_text = _decode_registry_pol_data(
+                instruction_data,
+                value_type,
+            )
+            target_names = [
+                item.strip()
+                for item in instruction_text.split(";")
+                if item.strip()
+            ]
+        elif lowered in {"**delvals.", "**deletekeys", "**securekey"}:
+            # These instructions describe deletion of values/keys or ACL
+            # behaviour that has already been applied by Group Policy.
+            # Reversing those effects would modify user data or security
+            # descriptors outside the safe Registry.pol value-removal scope.
             continue
         elif value_name.startswith("**"):
             continue
         else:
-            target_name = value_name
+            target_names = [value_name]
 
-        if not target_name:
-            continue
+        for target_name in target_names:
+            if not target_name:
+                continue
 
-        entries.append(
-            PolicyEntry(
-                hive=display_hive,
-                path=key_path,
-                value_name=target_name,
-                value="",
+            entries.append(
+                PolicyEntry(
+                    hive=display_hive,
+                    path=key_path,
+                    value_name=target_name,
+                    value="",
+                )
             )
-        )
-
-        # Keep a reference to the instruction bytes in the parser loop so
-        # malformed records cannot be silently accepted as empty records.
-        _ = instruction_data
 
     return entries
-
 
 def collect_local_registry_policy_entries(
     logger: Logger,
@@ -2450,11 +2459,9 @@ def show_removal_result(
     print(f"  Registry policy locations with data remaining: {len(registry_roots_after)}")
 
     print("\nGroup Policy Preferences History")
-    print(f"  Removed: {len(group_policy_history_removed)}")
-    print(f"  Removal failed: {len(group_policy_history_failures)}")
-    for item in group_policy_history_failures:
-        print(f"  [FAIL] {item.path}")
-        print(f"         {item.reason}")
+    print("  Automatic cleanup: Not performed")
+    print("  The history database is preserved to avoid changing remote GPO")
+    print("  preference processing behaviour.")
 
     print("\nGroup Policy refresh")
     if gpupdate_ok is None:
@@ -2517,8 +2524,7 @@ def show_removal_result(
         not still_failed
         and not remaining_stores
         and not registry_still_failed
-        and not registry_roots_after
-        and not group_policy_history_failures
+        and not targeted_registry_values_remaining
     )
 
     if (
@@ -2529,7 +2535,8 @@ def show_removal_result(
     ):
         print("No targeted Local Group Policy data was present before the operation.")
     elif operation_success:
-        print("Local Group Policy stores, Local Registry.pol results and Group Policy Preferences history were cleaned where safely identifiable.")
+        print("Local Group Policy stores and Local Registry.pol results were cleaned where safely identifiable.")
+        print("Group Policy Preferences History was intentionally preserved.")
         print("Restart Windows before final verification.")
     else:
         print("Some Local Group Policy or Registry policy data could not be fully removed.")
@@ -2808,9 +2815,12 @@ def remove_all_local_group_policy(
         )
         registry_still_failed = list(registry_failures)
 
-    history_removed, history_failures = remove_group_policy_history(
-        logger,
-    )
+    # Group Policy History is intentionally preserved. Microsoft documents it as
+    # the local database used by Group Policy Preferences, and deleting it can
+    # cause remote GPO preference processing to behave as if it were first
+    # applied. It is backed up above but never deleted automatically.
+    history_removed: list[str] = []
+    history_failures: list[RemovalFailure] = []
 
     print()
     print("Verifying Local Group Policy and Registry policy state...")
@@ -2921,7 +2931,6 @@ def write_restore_report(
     operation_succeeded = (
         not restore_errors
         and state_matches
-        and registry_state_matches
         and gpupdate_ok
     )
     data = {
@@ -2940,6 +2949,7 @@ def write_restore_report(
         "verification_passed": state_matches and registry_state_matches,
         "local_gpo_verification_passed": state_matches,
         "registry_verification_passed": registry_state_matches,
+        "registry_restore_mode": "non_destructive_reg_import",
         "operation_succeeded": operation_succeeded,
     }
     return write_json_report(session, "restore.json", data)
@@ -3399,53 +3409,29 @@ def restore_backup(
             )
             continue
 
-        current_exists, current_state = registry_policy_root_access_state(
-            display_hive,
-            root_path,
+        if backup_state.suffix.lower() == ".absent":
+            logger.info(
+                f"Registry root was absent in backup; current root was preserved: {full_path}"
+            )
+            continue
+
+        code, stdout, stderr = run_command(
+            [
+                "reg.exe",
+                "import",
+                str(backup_state),
+            ],
+            timeout=90,
         )
-        if current_exists or current_state != "Absent":
-            success, reason = remove_registry_policy_root(
-                display_hive,
-                root_path,
-                logger,
+        if code != 0:
+            restore_errors.append(
+                f"{full_path}: safe Registry import failed: "
+                f"{stderr.strip() or stdout.strip() or code}"
             )
-            if not success:
-                success, reason = force_remove_registry_policy_root(
-                    display_hive,
-                    root_path,
-                    logger,
-                )
-            if not success:
-                restore_errors.append(
-                    f"{full_path}: could not clear current Registry root: {reason}"
-                )
-                continue
-
-        if backup_state.suffix.lower() == ".reg":
-            if not command_exists("reg.exe"):
-                restore_errors.append(
-                    f"{full_path}: reg.exe was not found."
-                )
-                continue
-
-            code, stdout, stderr = run_command(
-                [
-                    "reg.exe",
-                    "import",
-                    str(backup_state),
-                ],
-                timeout=120,
+        else:
+            logger.info(
+                f"Safely imported Registry backup without deleting the current root: {full_path}"
             )
-
-            if code == 0:
-                logger.info(
-                    f"Restored Registry policy root from backup: {full_path}"
-                )
-            else:
-                restore_errors.append(
-                    f"{full_path}: Registry import failed: "
-                    f"{stderr.strip() or stdout.strip() or f'reg import exit code {code}'}"
-                )
 
     after = local_gpo_status()
     expected_set = set(expected_present)
