@@ -643,16 +643,16 @@ class RegistryPolSafetyTests(unittest.TestCase):
             path = Path(directory) / "Registry.pol"
 
             def encoded(value):
-                return value.encode("utf-16le") + b"\\x00\\x00"
+                return value.encode("utf-16le") + b"\x00\x00"
 
             body = (
-                b"[\\x00"
-                + encoded(r"Software\\Policies\\Example")
+                b"[\x00"
+                + encoded(r"Software\Policies\Example")
                 + encoded("**DeleteValues")
                 + struct.pack("<I", winreg.REG_SZ)
                 + struct.pack("<I", len(encoded("Alpha;Beta")))
                 + encoded("Alpha;Beta")
-                + b"]\\x00"
+                + b"]\x00"
             )
             path.write_bytes(
                 b"PReg" + struct.pack("<I", 1) + body
