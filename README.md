@@ -131,7 +131,9 @@ Stores remaining
 
 When a store cannot be removed normally, the utility can attempt a forced removal of that **specific local Group Policy store**.
 
-The reset operation deletes these four Registry policy roots recursively after backup, matching the Registry scope of the original script. For protected Registry keys, forced removal enables the required Windows token privileges in the PolicyReset process itself, uses native Windows security APIs to take ownership and grant temporary FullControl only to the local Administrators group and SYSTEM, repairs every key in the fixed target tree, and then deletes the tree. If deletion fails, the original security descriptors are restored on the keys that remain. Empty container keys recreated by Windows are not counted as remaining policy data. The operation does not grant permissions to Everyone, delete arbitrary Registry locations, or run `gpupdate /force`.
+The reset operation does not delete the four broad Registry policy roots. Instead, it removes only Registry values explicitly represented by the local `Machine\\Registry.pol` and `User\\Registry.pol` files. This prevents unrelated application or policy data under `HKLM\\SOFTWARE\\Policies`, `HKCU\\Software\\Policies` and the corresponding `CurrentVersion\\Policies` trees from being deleted.
+
+Protected Registry keys are not repaired with `takeown.exe`, `icacls.exe`, temporary ownership changes or forced ACL rewriting during reset. If a targeted value cannot be removed with normal Registry access, the operation reports the failure and stops short of broad permission changes.
 
 ### 3. Manage Group Policy backups
 
@@ -252,7 +254,7 @@ HKLM\SOFTWARE\Policies
 HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies
 ```
 
-The four Registry roots are deleted recursively after backup. Protected Registry trees use native Windows security APIs with the local Administrators group and SYSTEM as the temporary principals. There is no arbitrary path input for the destructive reset.
+The four Registry policy roots are never deleted recursively by the reset. Protected Registry trees use native Windows security APIs with the local Administrators group and SYSTEM as the temporary principals. There is no arbitrary path input for the destructive reset.
 
 ### Backup before modification
 
@@ -388,7 +390,7 @@ PolicyReset follows a small set of operational principles:
 
 PolicyReset is a Local Group Policy tool. It does not claim to remove policy delivered by domain controllers, Microsoft Entra ID, MDM, Intune or other organisation-controlled systems.
 
-Registry policy values under the four targeted roots are part of the core reset operation. They are counted before and after removal, and the reset is only reported as successful when no policy data remains under the targeted locations. Windows may recreate an empty container key; an empty container is not treated as remaining policy data. Registry data outside those four fixed roots is not removed.
+Registry policy values represented by local Registry.pol are part of the core reset operation. They are counted before and after removal, and the reset is reported as successful when the targeted Local Group Policy stores and targeted Registry.pol values are clear. Unrelated values that remain under broad policy Registry roots are reported but are not treated as reset failures. Windows may recreate an empty container key; an empty container is not treated as remaining policy data. Registry data outside those four fixed roots is not removed.
 
 A restart may be appropriate after a real Local Group Policy removal before performing final application-level verification.
 
@@ -412,3 +414,10 @@ The reset operation removes the Local Group Policy stores for the current comput
 It does not delete arbitrary \`HKLM\SOFTWARE\Policies\` or \`HKCU\Software\Policies\` trees, rewrite Registry ACLs, disable Windows services, modify firewall rules, delete accounts, or attempt to remove Active Directory, Microsoft Entra ID or MDM policy. Remote policy can be reapplied by Windows after a local reset.
 
 Security-policy effects and other Group Policy Preference effects that are stored outside the Local \`Registry.pol\` files remain outside the automatic reset scope and are reported as such.
+
+
+## Safety audit scope
+
+The 4.5.0 reset path is deliberately narrower than the original script. It does not recursively delete policy Registry roots, does not rewrite Registry ACLs, does not invoke `takeown.exe` or `icacls.exe`, and does not automatically delete Group Policy Preferences History. The latter is a documented local database used by Group Policy Preferences, and deleting it can change how future preference processing behaves. citeturn3search1turn3search8
+
+Registry.pol parsing follows Microsoft's documented instruction format, including normal values, `**Del.<valuename>`, `**soft.<valuename>`, and `**DeleteValues`. `**DeleteKeys`, `**DelVals.` and `**SecureKey` instructions are not reversed automatically because doing so would require modifying keys or security descriptors beyond the safe value-removal scope. citeturn2search0turn3search12
