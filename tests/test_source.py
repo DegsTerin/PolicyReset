@@ -28,7 +28,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         ast.parse(self.source)
 
     def test_expected_version(self):
-        self.assertIn('VERSION = "4.4.0"', self.source)
+        self.assertIn('VERSION = "4.5.0"', self.source)
 
     def test_terminal_only(self):
         self.assertNotIn("tkinter", self.source.lower())
@@ -66,6 +66,9 @@ class PolicyResetSourceTests(unittest.TestCase):
     def test_fixed_local_gpo_paths(self):
         self.assertIn('"GroupPolicy"', self.source)
         self.assertIn('"GroupPolicyUsers"', self.source)
+        self.assertIn("LOCAL_GPO_HISTORY_DIRECTORIES", self.source)
+        self.assertIn("def backup_group_policy_history(", self.source)
+        self.assertIn("def remove_group_policy_history(", self.source)
 
     def test_shell_execute_result_is_validated(self):
         self.assertIn("if result <= 32:", self.source)
@@ -143,16 +146,17 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('registry_after = scan_policy_registry(logger)', self.source)
 
 
-    def test_registry_policy_roots_are_destructive_reset_targets(self):
+    def test_registry_cleanup_is_derived_from_local_registry_pol(self):
         self.assertIn("def registry_policy_root_status(", self.source)
         self.assertIn("def parse_registry_pol(", self.source)
         self.assertIn("def remove_local_registry_policy_entries(", self.source)
         self.assertIn('"registry_policy_roots_before": registry_roots_before', self.source)
         self.assertIn('"registry_policy_roots_after": registry_roots_after', self.source)
-        self.assertIn("registry_cleanup_skipped = management.organisation_managed_indicator", self.source)
-        self.assertIn("Registry policy-result cleanup will be skipped", self.source)
+        self.assertIn("collect_local_registry_policy_entries(logger)", self.source)
+        self.assertNotIn("registry_cleanup_skipped = management.organisation_managed_indicator", self.source)
+        self.assertNotIn("Registry policy-result cleanup will be skipped because organisation-level management indicators were detected.", self.source)
 
-    def test_registry_force_path_repairs_permissions_without_everyone_acl(self):
+    def test_reset_path_does_not_use_forced_registry_acl_repair(self):
         self.assertIn("def _enable_process_privileges(", self.source)
         self.assertIn('"SeTakeOwnershipPrivilege"', self.source)
         self.assertIn('"SeBackupPrivilege"', self.source)
@@ -523,3 +527,60 @@ class PolicyResetSourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class LocalPolicyResetSafetyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = APP.read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.source)
+
+    def test_reset_collects_local_registry_pol_even_when_management_is_detected(self):
+        reset = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "remove_all_local_group_policy"
+        )
+        reset_text = ast.get_source_segment(self.source, reset) or ""
+        self.assertIn(
+            "collect_local_registry_policy_entries(logger)",
+            reset_text,
+        )
+        self.assertNotIn(
+            "if not management.organisation_managed_indicator:",
+            reset_text,
+        )
+
+    def test_reset_never_calls_gpupdate(self):
+        reset = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "remove_all_local_group_policy"
+        )
+        reset_text = ast.get_source_segment(self.source, reset) or ""
+        self.assertNotIn("refresh_group_policy(", reset_text)
+        self.assertNotIn("gpupdate.exe", reset_text)
+
+    def test_reset_cleans_documented_group_policy_history(self):
+        reset = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "remove_all_local_group_policy"
+        )
+        reset_text = ast.get_source_segment(self.source, reset) or ""
+        self.assertIn("remove_group_policy_history(", reset_text)
+        self.assertIn("history_failures", reset_text)
+
+    def test_reset_does_not_delete_policy_registry_roots(self):
+        reset = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "remove_all_local_group_policy"
+        )
+        reset_text = ast.get_source_segment(self.source, reset) or ""
+        self.assertNotIn("remove_registry_policy_root(", reset_text)
+        self.assertNotIn("force_remove_registry_policy_root(", reset_text)
+        self.assertIn("remove_local_registry_policy_entries(", reset_text)
