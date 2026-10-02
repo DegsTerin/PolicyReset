@@ -145,8 +145,8 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_registry_policy_roots_are_destructive_reset_targets(self):
         self.assertIn("def registry_policy_root_status(", self.source)
-        self.assertIn("def remove_registry_policy_root(", self.source)
-        self.assertIn("def force_remove_registry_policy_root(", self.source)
+        self.assertIn("def parse_registry_pol(", self.source)
+        self.assertIn("def remove_local_registry_policy_entries(", self.source)
         self.assertIn('"registry_policy_roots_before": registry_roots_before', self.source)
         self.assertIn('"registry_policy_roots_after": registry_roots_after', self.source)
         self.assertIn("registry_cleanup_skipped = management.organisation_managed_indicator", self.source)
@@ -339,8 +339,11 @@ class PolicyResetSourceTests(unittest.TestCase):
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
         }
-        self.assertIn("remove_registry_policy_root", calls)
+        self.assertIn("remove_local_registry_policy_entries", calls)
+        self.assertIn("collect_local_registry_policy_entries", calls)
         self.assertIn("scan_policy_registry", calls)
+        self.assertNotIn("force_remove_registry_policy_root", calls)
+        self.assertNotIn("force_remove_directory", calls)
 
     def test_restore_restores_registry_policy_roots(self):
         restore = next(
