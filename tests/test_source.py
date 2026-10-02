@@ -326,8 +326,11 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn('f"{base_name}.absent"', self.source)
         self.assertIn("Registry root was absent at backup time", self.source)
         self.assertIn('"registry_backup_success": registry_backup_ok', self.source)
-        self.assertIn('"backup_success": registry_backup_ok and gpo_backup_ok', self.source)
-        self.assertIn('if not registry_backup_ok:', self.source)
+        self.assertIn('"backup_success": (', self.source)
+        self.assertIn('registry_backup_ok', self.source)
+        self.assertIn('gpo_backup_ok', self.source)
+        self.assertIn('history_backup_ok', self.source)
+        self.assertIn('if not registry_backup_ok or not gpo_backup_ok or not history_backup_ok:', self.source)
 
 
     def test_reset_removes_registry_policy_roots(self):
@@ -369,7 +372,7 @@ class PolicyResetSourceTests(unittest.TestCase):
 
     def test_project_metadata_version(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "4.4.0"', metadata)
+        self.assertIn('version = "4.5.0"', metadata)
 
     def test_all_project_local_function_calls_resolve(self):
         local_defs = {
