@@ -41,7 +41,7 @@ from typing import Any
 
 
 APP_NAME = "PolicyReset"
-VERSION = "4.4.0"
+VERSION = "4.5.0"
 
 DATA_ROOT = (
     Path(os.environ.get("ProgramData", r"C:\ProgramData"))
@@ -60,8 +60,20 @@ LOCAL_GPO_DIRECTORIES = (
     / "GroupPolicyUsers",
 )
 
+LOCAL_GPO_HISTORY_DIRECTORIES = (
+    Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+    / "Microsoft"
+    / "Group Policy"
+    / "History",
+    Path(os.environ.get("LOCALAPPDATA", ""))
+    / "Microsoft"
+    / "Group Policy"
+    / "History",
+)
+
 BACKUP_ARTIFACT_NAMES = (
     "LocalGroupPolicy",
+    "GroupPolicyHistory",
     "Registry",
     "backup-manifest.json",
 )
@@ -1862,6 +1874,46 @@ def backup_local_group_policy(
     return True, backed_up
 
 
+def backup_group_policy_history(
+    session: Session,
+    logger: Logger,
+) -> tuple[bool, list[str]]:
+    """Back up Local Group Policy Preferences history before cleanup."""
+    directory = session.directory / "GroupPolicyHistory"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    backed_up: list[str] = []
+
+    for source in LOCAL_GPO_HISTORY_DIRECTORIES:
+        if not source:
+            continue
+
+        destination = directory / f"{len(backed_up)}_{source.name or 'History'}"
+
+        if not source.exists():
+            marker = directory / f"{len(backed_up)}_absent.txt"
+            marker.write_text(
+                f"Source not present at backup time: {source}\n",
+                encoding="utf-8",
+            )
+            backed_up.append(str(marker))
+            continue
+
+        try:
+            shutil.copytree(source, destination)
+            backed_up.append(str(destination))
+            logger.info(
+                f"Group Policy History backup created: {destination}"
+            )
+        except OSError as exc:
+            logger.error(
+                f"Could not back up Group Policy History {source}: {exc}"
+            )
+            return False, backed_up
+
+    return True, backed_up
+
+
 def create_backup(
     session: Session,
     logger: Logger,
@@ -1882,13 +1934,24 @@ def create_backup(
         )
     )
 
+    history_backup_ok, history_backups = backup_group_policy_history(
+        session,
+        logger,
+    )
+
     manifest = {
         "created_at": timestamp(),
         "registry_backups": registry_backups,
         "registry_backup_success": registry_backup_ok,
         "local_group_policy_backups": gpo_backups,
         "local_group_policy_backup_success": gpo_backup_ok,
-        "backup_success": registry_backup_ok and gpo_backup_ok,
+        "group_policy_history_backups": history_backups,
+        "group_policy_history_backup_success": history_backup_ok,
+        "backup_success": (
+            registry_backup_ok
+            and gpo_backup_ok
+            and history_backup_ok
+        ),
     }
 
     path = (
@@ -1941,6 +2004,38 @@ def confirm_yes_no(
         print(
             "Please answer Yes (Y) or No (N)."
         )
+
+
+def remove_group_policy_history(
+    logger: Logger,
+) -> tuple[list[str], list[RemovalFailure]]:
+    """Remove only the documented local Group Policy Preferences history stores."""
+    removed: list[str] = []
+    failures: list[RemovalFailure] = []
+
+    for directory in LOCAL_GPO_HISTORY_DIRECTORIES:
+        if not directory:
+            continue
+
+        if not directory.exists():
+            continue
+
+        success, reason = remove_directory_normal(
+            directory,
+            logger,
+        )
+
+        if success:
+            removed.append(str(directory))
+        else:
+            failures.append(
+                RemovalFailure(
+                    path=str(directory),
+                    reason=reason,
+                )
+            )
+
+    return removed, failures
 
 
 def remove_directory_normal(
@@ -2153,6 +2248,8 @@ def write_reset_report(
     registry_roots_after: list[str],
     registry_cleanup_skipped: bool,
     local_registry_policy_entry_count: int,
+    group_policy_history_removed: list[str],
+    group_policy_history_failures: list[RemovalFailure],
     unsupported_registry_policy_files: list[str],
 ) -> Path:
     data = {
@@ -2187,6 +2284,11 @@ def write_reset_report(
         "registry_cleanup_skipped": registry_cleanup_skipped,
         "local_registry_policy_entry_count": local_registry_policy_entry_count,
         "unsupported_registry_policy_files": unsupported_registry_policy_files,
+        "group_policy_history_removed": group_policy_history_removed,
+        "group_policy_history_failures": [
+            asdict(item)
+            for item in group_policy_history_failures
+        ],
         "gpupdate_succeeded": gpupdate_ok,
         "gpupdate_scope": (
             "not_run_during_reset"
@@ -2257,6 +2359,8 @@ def show_removal_result(
     registry_still_failed: list[RemovalFailure],
     registry_roots_after: list[str],
     registry_cleanup_skipped: bool,
+    group_policy_history_removed: list[str],
+    group_policy_history_failures: list[RemovalFailure],
 ) -> None:
     print()
     print("=" * 78)
@@ -2265,6 +2369,7 @@ def show_removal_result(
         not still_failed
         and not remaining_stores
         and not registry_still_failed
+        and not group_policy_history_failures
     )
 
     if before_count == 0 and registry_before_count == 0 and operation_clear:
@@ -2333,6 +2438,13 @@ def show_removal_result(
 
     print(f"  Registry policy locations with data remaining: {len(registry_roots_after)}")
 
+    print("\nGroup Policy Preferences History")
+    print(f"  Removed: {len(group_policy_history_removed)}")
+    print(f"  Removal failed: {len(group_policy_history_failures)}")
+    for item in group_policy_history_failures:
+        print(f"  [FAIL] {item.path}")
+        print(f"         {item.reason}")
+
     print("\nGroup Policy refresh")
     if gpupdate_ok is None:
         print("  gpupdate /force: Not run during reset")
@@ -2399,7 +2511,7 @@ def show_removal_result(
     ):
         print("No targeted Local Group Policy data was present before the operation.")
     elif operation_success:
-        print("Local Group Policy and targeted Registry policy roots removed successfully.")
+        print("Local Group Policy stores, Local Registry.pol results and Group Policy Preferences history were cleaned where safely identifiable.")
         print("Restart Windows before final verification.")
     else:
         print("Some Local Group Policy or Registry policy data could not be fully removed.")
@@ -2567,8 +2679,12 @@ def remove_all_local_group_policy(
     )
     print()
     print(
-        "Local Security Policy, Windows services, firewall rules, scheduled "
-        "tasks and other system configuration are not reset by this operation."
+        "The reset does not disable Windows services or alter firewall rules, "
+        "scheduled tasks, accounts or unrelated system configuration."
+    )
+    print(
+        "Security-policy effects that are stored outside Registry.pol are "
+        "reported as outside the automatic reset scope."
     )
     print()
 
@@ -2579,12 +2695,12 @@ def remove_all_local_group_policy(
             "Organisation-level management indicators were detected."
         )
         print(
-            "The Local Group Policy stores can still be removed, but Registry "
-            "policy-result cleanup will be skipped because the remaining "
-            "Registry state may belong to remote policy."
+            "Only Local Group Policy data represented by the local stores and "
+            "local Registry.pol files will be removed."
         )
         print(
-            "A remote GPO or MDM policy can be reapplied by Windows."
+            "Active Directory, Microsoft Entra ID and MDM policy remain outside "
+            "the reset scope and may be reapplied by Windows."
         )
         print()
 
@@ -2650,17 +2766,12 @@ def remove_all_local_group_policy(
     registry_forced_removed: list[str] = []
     registry_still_failed: list[RemovalFailure] = []
 
-    registry_cleanup_skipped = management.organisation_managed_indicator
+    registry_cleanup_skipped = False
 
-    if registry_cleanup_skipped:
-        logger.warn(
-            "Registry policy-result cleanup was skipped because organisation-level "
-            "management indicators were detected."
-        )
-    elif unsupported_registry_policy_files:
+    if unsupported_registry_policy_files:
         logger.error(
             "Registry policy cleanup was not attempted because one or more "
-            "local Registry.pol files could not be parsed."
+            "local Registry.pol files could not be parsed safely."
         )
         registry_failures.extend(
             RemovalFailure(
@@ -2679,6 +2790,10 @@ def remove_all_local_group_policy(
             logger,
         )
         registry_still_failed = list(registry_failures)
+
+    history_removed, history_failures = remove_group_policy_history(
+        logger,
+    )
 
     print()
     print("Verifying Local Group Policy and Registry policy state...")
@@ -2711,6 +2826,8 @@ def remove_all_local_group_policy(
         registry_cleanup_skipped,
         len(local_policy_entries),
         unsupported_registry_policy_files,
+        history_removed,
+        history_failures,
     )
 
     show_removal_result(
@@ -2734,6 +2851,8 @@ def remove_all_local_group_policy(
         registry_still_failed,
         registry_roots_after,
         registry_cleanup_skipped,
+        history_removed,
+        history_failures,
     )
 
     input("\nPress Enter to return to the main menu...")
