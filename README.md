@@ -403,3 +403,12 @@ See [`AUDIT.md`](AUDIT.md) for implementation audit notes and the current design
 ## Licence
 
 This project is licensed under the MIT License. See [`LICENSE`](LICENSE).
+
+
+## Reset scope in 4.5.0
+
+The reset operation removes the Local Group Policy stores for the current computer and user, removes Registry values represented by the local \`Machine\Registry.pol\` and \`User\Registry.pol\` files, and cleans the documented local Group Policy Preferences history stores after creating a backup.
+
+It does not delete arbitrary \`HKLM\SOFTWARE\Policies\` or \`HKCU\Software\Policies\` trees, rewrite Registry ACLs, disable Windows services, modify firewall rules, delete accounts, or attempt to remove Active Directory, Microsoft Entra ID or MDM policy. Remote policy can be reapplied by Windows after a local reset.
+
+Security-policy effects and other Group Policy Preference effects that are stored outside the Local \`Registry.pol\` files remain outside the automatic reset scope and are reported as such.
