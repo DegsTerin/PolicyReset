@@ -149,7 +149,8 @@ class PolicyResetSourceTests(unittest.TestCase):
         self.assertIn("def force_remove_registry_policy_root(", self.source)
         self.assertIn('"registry_policy_roots_before": registry_roots_before', self.source)
         self.assertIn('"registry_policy_roots_after": registry_roots_after', self.source)
-        self.assertIn("Registry policy roots are deleted recursively after backup.", self.source)
+        self.assertIn("registry_cleanup_skipped = management.organisation_managed_indicator", self.source)
+        self.assertIn("Registry policy-result cleanup will be skipped", self.source)
 
     def test_registry_force_path_repairs_permissions_without_everyone_acl(self):
         self.assertIn("def _enable_process_privileges(", self.source)
@@ -378,7 +379,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         known = {
             "Path", "SystemExit", "ValueError", "any", "asdict", "bool", "dataclass",
             "enumerate", "getattr", "input", "int", "len", "print",
-            "range", "repr", "reversed", "set", "sorted", "str", "tuple"
+            "range", "repr", "reversed", "set", "sorted", "str", "tuple", "list"
         }
         called = {
             node.func.id
@@ -434,7 +435,7 @@ class PolicyResetSourceTests(unittest.TestCase):
         )
         reset_text = ast.get_source_segment(self.source, reset) or ""
         self.assertNotIn("Refreshing User and Computer Group Policy", reset_text)
-        self.assertIn("Verifying Local Group Policy and Registry policy roots", reset_text)
+        self.assertIn("Verifying Local Group Policy and Registry policy state", reset_text)
 
     def test_success_result_does_not_depend_on_gpupdate(self):
         self.assertIn('not remaining_stores', self.source)
